@@ -4,8 +4,6 @@ module Main where
 
 import Luna.Prelude hiding (Level, switch, argument)
 import qualified Luna.Shell
-import Options.Applicative hiding (helper, info)
-import qualified Options.Applicative as Opts
 import qualified Data.List as List
 import           Data.Map (Map)
 import qualified Data.Map  as Map
@@ -13,27 +11,29 @@ import qualified Data.Text as Text
 import qualified System.Environment as System
 import qualified Text.PrettyPrint.ANSI.Leijen as Doc
 
--- import qualified System.Console.Options as O
+import System.Console.Options hiding (main)
+import qualified System.Console.Options as O
+import System.Exit (exitSuccess, exitFailure)
 
-class Pretty a where
-    showPretty :: a -> Text
-    readPretty :: Text -> Either String a
+-- class Pretty a where
+--     showPretty :: a -> Text
+--     readPretty :: Text -> Either String a
 
 
 
-
-
+--
+--
 class CmdParser a where
     parseCmd :: Parser a
-
-
-
-
-phantom :: Mod FlagFields () -> Parser ()
-phantom = flag () ()
-
-phantom' :: Parser ()
-phantom' = phantom mempty
+--
+--
+--
+--
+-- phantom :: Mod FlagFields () -> Parser ()
+-- phantom = flag () ()
+--
+-- phantom' :: Parser ()
+-- phantom' = phantom mempty
 
 
 
@@ -77,13 +77,13 @@ phantom' = phantom mempty
 
 type ConfigTree = Map Text Text
 
-configTreeParser :: Parser ConfigTree
-configTreeParser = foldr (uncurry Map.insert) mempty <$> many configTreeValParser
-
-configTreeValParser :: Parser (Text, Text)
-configTreeValParser = (,)
-    <$> strOption   (hidden <> long "set" <> metavar "component value" <> helpDoc (Just $ "Set configuration value." Doc.<$> "See \"configuration\" help topic for detailed description."))
-    <*> strArgument (internal <> metavar "value")
+-- configTreeParser :: Parser ConfigTree
+-- configTreeParser = foldr (uncurry Map.insert) mempty <$> many configTreeValParser
+--
+-- configTreeValParser :: Parser (Text, Text)
+-- configTreeValParser = (,)
+--     <$> strOption   (hidden <> long "set" <> metavar "component value" <> helpDoc (Just $ "Set configuration value." Doc.<$> "See \"configuration\" help topic for detailed description."))
+--     <*> strArgument (internal <> metavar "value")
 
 
 -- luna build --set pass.analysis.simpleaa.enabled   true
@@ -137,7 +137,7 @@ data BuildCfg = BuildCfg
 
 
 instance CmdParser BuildCfg where
-    parseCmd = BuildCfg <$> configTreeParser
+    parseCmd = undefined -- BuildCfg <$> configTreeParser
 
 
 
@@ -194,26 +194,26 @@ instance CmdParser PackageOpts where
 
 data HelpOpts = HelpAboutConfig deriving (Show)
 
-instance CmdParser HelpOpts where
-    parseCmd = subparser (mconcat [ commandGroup "Help topics:", metavar "topic"
-              , command "configuration" . info (pure HelpAboutConfig)   $ progDesc "Luna toolkit configuration management."
-              ])
+-- instance CmdParser HelpOpts where
+--     parseCmd = subparser (mconcat [ commandGroup "Help topics:", metavar "topic"
+            --   , command "configuration" . info (pure HelpAboutConfig)   $ progDesc "Luna toolkit configuration management."
+            --   ])
 
 
 -- === Run === --
 
 data RunOpts = RunOpts deriving (Show)
 
-instance CmdParser RunOpts where
-    parseCmd = pure RunOpts
+-- instance CmdParser RunOpts where
+--     parseCmd = pure RunOpts
 
 
 -- === Version === --
 
 data VersionOpts = VersionOpts deriving (Show)
 
-instance CmdParser VersionOpts where
-    parseCmd = pure VersionOpts
+-- instance CmdParser VersionOpts where
+--     parseCmd = pure VersionOpts
 
 
 
@@ -233,21 +233,29 @@ data RootCmd = Build   BuildCfg
 
 
 rootCmd :: Parser RootCmd
-rootCmd = subparser (mconcat [ commandGroup "Compilation:", metavar "command"
-          , command "build"    . cmdInfo Build   $ progDesc "Compile packages and dependencies."
-          , command "clean"    . cmdInfo Clean   $ progDesc "Remove compilation cache."
-          , command "install"  . cmdInfo Install $ progDesc "Compile and install packages and dependencies."
-          , command "run"      . cmdInfo Run     $ progDesc "Compile and run Luna programs."
-          ])
-      <|> subparser (mconcat [ commandGroup "Package management:", hidden
-          , command "new"      . cmdInfo New     $ progDesc "Create new package."
-          , command "package"  . cmdInfo Package $ progDesc "Package management tools."
-          ])
-      <|> subparser (mconcat [ commandGroup "Information:", hidden
-          , command "help"     . cmdInfo Help    $ progDesc "Additional help topics."
-          , command "info"     . cmdInfo Version $ progDesc "Access environment information."
-          ])
+rootCmd = subcommand "build" Build (help "Compile packages and dependencies.")
+      <|> subcommand "clean" Clean (help "Remove compilation cache.")
+      <|>    command "help"  (arg printHelpAndExit id) id
+-- rootCmd = subparser (mconcat [ commandGroup "Compilation:", metavar "command"
+--           , command "build"    . cmdInfo Build   $ progDesc "Compile packages and dependencies."
+--           , command "clean"    . cmdInfo Clean   $ progDesc "Remove compilation cache."
+--           , command "install"  . cmdInfo Install $ progDesc "Compile and install packages and dependencies."
+--           , command "run"      . cmdInfo Run     $ progDesc "Compile and run Luna programs."
+--           ])
+--       <|> subparser (mconcat [ commandGroup "Package management:", hidden
+--           , command "new"      . cmdInfo New     $ progDesc "Create new package."
+--           , command "package"  . cmdInfo Package $ progDesc "Package management tools."
+--           ])
+--       <|> subparser (mconcat [ commandGroup "Information:", hidden
+--           , command "help"     . cmdInfo Help    $ progDesc "Additional help topics."
+--           , command "info"     . cmdInfo Version $ progDesc "Access environment information."
+--           ])
 
+
+subcommand n t = command n (t <$> parseCmd)
+
+printHelpAndExit :: MonadIO m => m a
+printHelpAndExit = liftIO $ outputHelp [("command", "Available commands:")] rootCmd >> exitSuccess
 
 
 -------------------
@@ -256,43 +264,48 @@ rootCmd = subparser (mconcat [ commandGroup "Compilation:", metavar "command"
 
 main :: IO ()
 main = do
-    -- O.main
-    args <- System.getArgs
-    opts <- handleParseResult $ execParserPure prefs pinfo (preprocessArgs args)
-    print opts
-    return ()
-    where prefs = defaultPrefs {prefShowHelpOnEmpty = True}
-          pinfo = info rootCmd
-                $ fullDesc <> header "Luna compiler and ecosystem toolkit."
-                           <> footer "Use `luna [topic] help` for more information about that topic."
+    O.main
+    putStrLn "----------------"
+    outputHelp [("command", "Available commands:")] rootCmd
+    runOptionParser rootCmd ["help"]
+    putStrLn ""
 
+    -- args <- System.getArgs
+    -- opts <- handleParseResult $ execParserPure prefs pinfo (preprocessArgs args)
+    -- print opts
+    -- return ()
+    -- where prefs = defaultPrefs {prefShowHelpOnEmpty = True}
+    --       pinfo = info rootCmd
+    --             $ fullDesc <> header "Luna compiler and ecosystem toolkit."
+    --                        <> footer "Use `luna [topic] help` for more information about that topic."
 
-preprocessArgs :: [String] -> [String]
-preprocessArgs = concat . go 0 where
-    go i   = \case []     -> []
-                   (a:as) -> (procArg i a) : go (succ i) as
-    procArg i a = if
-        | a == "help" && i /= 0 -> ["--help"] -- FIXME: https://github.com/pcapriotti/optparse-applicative/issues/272
-        | countMinus a == 1     -> ["--set", drop 1 a <> ".enabled", "false"]
-        | countPlus  a == 1     -> ["--set", drop 1 a <> ".enabled", "true"]
-        | otherwise             -> [a]
-
-
-countMinus, countPlus :: String -> Int
-countMinus = countPrefix '-'
-countPlus  = countPrefix '+'
-
-countPrefix :: Char -> String -> Int
-countPrefix c = length . List.takeWhile (== c)
-
-
-info p = Opts.info (p <**> helper)
-
-cmdInfo p = info (p <$> parseCmd)
-
-helper :: Parser (a -> a)
-helper = abortOption ShowHelpText (internal <> long "help" <> help "Show this help text.")
-
+--
+-- preprocessArgs :: [String] -> [String]
+-- preprocessArgs = concat . go 0 where
+--     go i   = \case []     -> []
+--                    (a:as) -> (procArg i a) : go (succ i) as
+--     procArg i a = if
+--         | a == "help" && i /= 0 -> ["--help"] -- FIXME: https://github.com/pcapriotti/optparse-applicative/issues/272
+--         | countMinus a == 1     -> ["--set", drop 1 a <> ".enabled", "false"]
+--         | countPlus  a == 1     -> ["--set", drop 1 a <> ".enabled", "true"]
+--         | otherwise             -> [a]
+--
+--
+-- countMinus, countPlus :: String -> Int
+-- countMinus = countPrefix '-'
+-- countPlus  = countPrefix '+'
+--
+-- countPrefix :: Char -> String -> Int
+-- countPrefix c = length . List.takeWhile (== c)
+--
+--
+-- info p = Opts.info (p <**> helper)
+--
+-- cmdInfo p = info (p <$> parseCmd)
+--
+-- helper :: Parser (a -> a)
+-- helper = abortOption ShowHelpText (internal <> long "help" <> help "Show this help text.")
+--
 
 -- print =<< customExecParser () opts
 --   where

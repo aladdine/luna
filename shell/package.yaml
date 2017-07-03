@@ -32,7 +32,8 @@ executables:
       - optparse-applicative
       - text
       - ansi-wl-pprint
-      
+      - cmd
+
 default-extensions:
     - AllowAmbiguousTypes
     - ApplicativeDo
