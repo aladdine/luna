@@ -14,6 +14,7 @@ import qualified Text.PrettyPrint.ANSI.Leijen as Doc
 import System.Console.Options hiding (main)
 import qualified System.Console.Options as O
 import System.Exit (exitSuccess, exitFailure)
+import Text.Parsert hiding (option)
 
 -- class Pretty a where
 --     showPretty :: a -> Text
@@ -77,14 +78,31 @@ class CmdParser a where
 
 type ConfigTree = Map Text Text
 
--- configTreeParser :: Parser ConfigTree
--- configTreeParser = foldr (uncurry Map.insert) mempty <$> many configTreeValParser
+configTreeParser :: Parser ConfigTree
+configTreeParser = foldr (uncurry Map.insert) mempty <$> multiple optSetParser
 --
 -- configTreeValParser :: Parser (Text, Text)
 -- configTreeValParser = (,)
 --     <$> strOption   (hidden <> long "set" <> metavar "component value" <> helpDoc (Just $ "Set configuration value." Doc.<$> "See \"configuration\" help topic for detailed description."))
 --     <*> strArgument (internal <> metavar "value")
 
+-- configTreeValParser :: Parser (Text, Text)
+-- configTreeValParser = sub $ (,)
+--     <$> strOption "--" "set" (help "yo")
+--     <*> arg (convert <$> anyToken) id
+
+fullOptSetParser :: Parser (Text, Text)
+fullOptSetParser = sub $ (,)
+    <$> strOption "--" "set" (help "yo")
+    <*> arg (convert <$> anyToken) id
+
+shortOptDisableParser :: Parser (Text, Text)
+shortOptDisableParser = sub $ ((,"true") . (<> ".enabled"))
+    <$  arg (token "-") (help "yo2")
+    <*> arg (convert <$> anyToken) id
+
+optSetParser :: Parser (Text, Text)
+optSetParser = fullOptSetParser <|> shortOptDisableParser
 
 -- luna build --set pass.analysis.simpleaa.enabled   true
 -- luna build +pass.analysis.simpleaa
@@ -137,7 +155,7 @@ data BuildCfg = BuildCfg
 
 
 instance CmdParser BuildCfg where
-    parseCmd = undefined -- BuildCfg <$> configTreeParser
+    parseCmd = BuildCfg <$> configTreeParser
 
 
 
@@ -264,13 +282,14 @@ printHelpAndExit = liftIO $ outputHelp [("command", "Available commands:")] root
 
 main :: IO ()
 main = do
-    O.main
-    putStrLn "----------------"
-    outputHelp [("command", "Available commands:")] rootCmd
-    runOptionParser rootCmd ["help"]
-    putStrLn ""
+    -- O.main
+    -- putStrLn "----------------"
+    args <- System.getArgs
+    if null args
+        then printHelpAndExit
+        else runOptionParser rootCmd args
+    -- putStrLn ""
 
-    -- args <- System.getArgs
     -- opts <- handleParseResult $ execParserPure prefs pinfo (preprocessArgs args)
     -- print opts
     -- return ()
