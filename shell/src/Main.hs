@@ -94,15 +94,20 @@ configTreeParser = foldr (uncurry Map.insert) mempty <$> multiple optSetParser
 fullOptSetParser :: Parser (Text, Text)
 fullOptSetParser = sub $ (,)
     <$> strOption "--" "set" (help "yo")
-    <*> arg (convert <$> anyToken) id
+    <*> arg (convert <$> lexeme anyWord) id
 
 shortOptDisableParser :: Parser (Text, Text)
-shortOptDisableParser = sub $ ((,"true") . (<> ".enabled"))
-    <$  arg (token "-") (help "yo2")
-    <*> arg (convert <$> anyToken) id
+shortOptDisableParser = sub $ ((,"false") . (<> ".enabled"))
+    <$  arg (token '-' <* notFollowedBy (token '-')) (help "yo2")
+    <*> arg (convert <$> lexeme anyWord) id
+
+shortOptEnableParser :: Parser (Text, Text)
+shortOptEnableParser = sub $ ((,"true") . (<> ".enabled"))
+    <$  arg (token '+' <* notFollowedBy (token '-')) (help "yo2")
+    <*> arg (convert <$> lexeme anyWord) id
 
 optSetParser :: Parser (Text, Text)
-optSetParser = fullOptSetParser <|> shortOptDisableParser
+optSetParser = fullOptSetParser <|> shortOptDisableParser <|> shortOptEnableParser
 
 -- luna build --set pass.analysis.simpleaa.enabled   true
 -- luna build +pass.analysis.simpleaa
@@ -282,7 +287,7 @@ printHelpAndExit = liftIO $ outputHelp [("command", "Available commands:")] root
 
 main :: IO ()
 main = do
-    -- O.main
+    O.main
     -- putStrLn "----------------"
     args <- System.getArgs
     if null args
