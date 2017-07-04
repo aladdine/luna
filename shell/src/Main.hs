@@ -80,31 +80,21 @@ type ConfigTree = Map Text Text
 
 configTreeParser :: Parser ConfigTree
 configTreeParser = foldr (uncurry Map.insert) mempty <$> multiple optSetParser
---
--- configTreeValParser :: Parser (Text, Text)
--- configTreeValParser = (,)
---     <$> strOption   (hidden <> long "set" <> metavar "component value" <> helpDoc (Just $ "Set configuration value." Doc.<$> "See \"configuration\" help topic for detailed description."))
---     <*> strArgument (internal <> metavar "value")
 
--- configTreeValParser :: Parser (Text, Text)
--- configTreeValParser = sub $ (,)
---     <$> strOption "--" "set" (help "yo")
---     <*> arg (convert <$> anyToken) id
 
 fullOptSetParser :: Parser (Text, Text)
 fullOptSetParser = sub $ (,)
     <$> strOption "--" "set" (help "yo")
     <*> arg (convert <$> lexeme anyWord) id
 
-shortOptDisableParser :: Parser (Text, Text)
-shortOptDisableParser = sub $ ((,"false") . (<> ".enabled"))
-    <$  arg (token '-' <* notFollowedBy (token '-')) (help "yo2")
+shortOptSwitchParser :: Char -> Text -> (ArgConfig -> ArgConfig) -> Parser (Text, Text)
+shortOptSwitchParser pfx val cfg = sub $ ((,val) . (<> ".enabled"))
+    <$  arg (token pfx <* notFollowedBy (token pfx)) cfg
     <*> arg (convert <$> lexeme anyWord) id
 
-shortOptEnableParser :: Parser (Text, Text)
-shortOptEnableParser = sub $ ((,"true") . (<> ".enabled"))
-    <$  arg (token '+' <* notFollowedBy (token '-')) (help "yo2")
-    <*> arg (convert <$> lexeme anyWord) id
+shortOptDisableParser, shortOptEnableParser :: Parser (Text, Text)
+shortOptDisableParser = shortOptSwitchParser '-' "false" (help "yo2")
+shortOptEnableParser  = shortOptSwitchParser '+' "true"  (help "yo2")
 
 optSetParser :: Parser (Text, Text)
 optSetParser = fullOptSetParser <|> shortOptDisableParser <|> shortOptEnableParser
@@ -258,7 +248,7 @@ data RootCmd = Build   BuildCfg
 rootCmd :: Parser RootCmd
 rootCmd = subcommand "build" Build (help "Compile packages and dependencies.")
       <|> subcommand "clean" Clean (help "Remove compilation cache.")
-      <|>    command "help"  (arg printHelpAndExit id) id
+      <|>    command "help"  (action printHelpAndExit) id
 -- rootCmd = subparser (mconcat [ commandGroup "Compilation:", metavar "command"
 --           , command "build"    . cmdInfo Build   $ progDesc "Compile packages and dependencies."
 --           , command "clean"    . cmdInfo Clean   $ progDesc "Remove compilation cache."
@@ -287,7 +277,7 @@ printHelpAndExit = liftIO $ outputHelp [("command", "Available commands:")] root
 
 main :: IO ()
 main = do
-    O.main
+    -- O.main
     -- putStrLn "----------------"
     args <- System.getArgs
     if null args
