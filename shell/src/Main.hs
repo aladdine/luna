@@ -150,8 +150,8 @@ data BuildCfg = BuildCfg
 
 
 instance CmdParser BuildCfg where
-    parseCmd = BuildCfg <$> configTreeParser
-
+    parseCmd = (BuildCfg <$> configTreeParser)
+             <|> command "help"  (action printHelpAndExit) id
 
 
 
@@ -266,6 +266,12 @@ rootCmd = subcommand "build" Build (help "Compile packages and dependencies.")
 
 
 subcommand n t = command n (t <$> parseCmd)
+
+addHelp :: (MonadIO m, HasTags t, HasMaybeLabel t, HasMaybeHelp t, HasMaybeMetavar t, Default t, Token m ~ Char, MonadTokenParser m, MonadProgressParser m, Alternative m) 
+        => FreeParserT t m a -> FreeParserT t m a
+addHelp p = p <|> command "help" (action printHelpAndExit) id where
+    printHelpAndExit = liftIO $ outputHelp [("command", "Available commands:")] p >> exitSuccess
+
 
 printHelpAndExit :: MonadIO m => m a
 printHelpAndExit = liftIO $ outputHelp [("command", "Available commands:")] rootCmd >> exitSuccess
