@@ -34,7 +34,8 @@ executables:
       - ansi-wl-pprint
       - cmd
       - parsert
-      
+      - layouting
+
 default-extensions:
     - AllowAmbiguousTypes
     - ApplicativeDo

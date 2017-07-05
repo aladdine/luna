@@ -34,7 +34,7 @@ packages:
 - extra-dep: true
   location: {commit: 53538017ad47a0a473233577595d8ac6e3eae9a0, git: 'https://github.com/luna/poly-control.git'}
 - extra-dep: true
-  location: {commit: 64179d2492e68016fb34d09b6faf966f3b9f91bd, git: 'https://github.com/luna/prologue.git'}
+  location: {commit: 4ea82e481812ffce49c044e1e84d99e19c08bc2f, git: 'https://github.com/luna/prologue.git'}
 - extra-dep: true
   location: {commit: 7c9eab45f65ab98290282e11d19e39401830ab9c, git: 'https://github.com/luna/type-cache.git'}
 - extra-dep: true
@@ -54,7 +54,7 @@ packages:
 - extra-dep: true
   location: {commit: e8dfa519660ae1174e7e28ae7d74f85955bfa415, git: 'https://github.com/luna/text-processing'}
 - extra-dep: true
-  location: {commit: 23d11542f1c58bd56feeed9c799c5f6b705b11fd, git: 'https://github.com/luna/parsert'}
+  location: {commit: cbdd5a5bf7aeab94c4fb33476b38c70e3cfee6f0, git: 'https://github.com/luna/parsert'}
 - extra-dep: true
-  location: {commit: 7d4a9ffb222961a7f3aae064d478762c2a45e7b9, git: 'https://github.com/luna/layouting'}
+  location: {commit: beaafe60703597571509ea57fd0843ee047bd78b, git: 'https://github.com/luna/layouting'}
 resolver: lts-8.19

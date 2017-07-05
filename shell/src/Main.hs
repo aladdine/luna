@@ -9,12 +9,13 @@ import           Data.Map (Map)
 import qualified Data.Map  as Map
 import qualified Data.Text as Text
 import qualified System.Environment as System
-import qualified Text.PrettyPrint.ANSI.Leijen as Doc
 
 import System.Console.Options hiding (main)
 import qualified System.Console.Options as O
 import System.Exit (exitSuccess, exitFailure)
 import Text.Parsert hiding (option)
+import qualified Data.Layout        as Doc
+import           Data.Layout        ((<+>), (</>), (<//>))
 
 -- class Pretty a where
 --     showPretty :: a -> Text
@@ -84,17 +85,17 @@ configTreeParser = foldr (uncurry Map.insert) mempty <$> multiple optSetParser
 
 fullOptSetParser :: Parser (Text, Text)
 fullOptSetParser = sub $ (,)
-    <$> strOption "--" "set" (help "yo")
+    <$> strOption "--" "set" (help $ "Set configuration options." </> "Use `luna help generic-config` to learn more.")
     <*> arg (convert <$> lexeme anyWord) id
 
 shortOptSwitchParser :: Char -> Text -> (ArgConfig -> ArgConfig) -> Parser (Text, Text)
 shortOptSwitchParser pfx val cfg = sub $ ((,val) . (<> ".enabled"))
-    <$  arg (token pfx <* notFollowedBy (token pfx)) cfg
+    <$  arg (token pfx <* notFollowedBy (token pfx)) (cfg . tag "option" . label (convert pfx <> " " <> "opt"))
     <*> arg (convert <$> lexeme anyWord) id
 
 shortOptDisableParser, shortOptEnableParser :: Parser (Text, Text)
-shortOptDisableParser = shortOptSwitchParser '-' "false" (help "yo2")
-shortOptEnableParser  = shortOptSwitchParser '+' "true"  (help "yo2")
+shortOptDisableParser = shortOptSwitchParser '-' "false" (help "Shortcut for --set opt.enabled false")
+shortOptEnableParser  = shortOptSwitchParser '+' "true"  (help "Shortcut for --set opt.enabled true")
 
 optSetParser :: Parser (Text, Text)
 optSetParser = fullOptSetParser <|> shortOptDisableParser <|> shortOptEnableParser
@@ -142,7 +143,8 @@ data BuildCfg = BuildCfg
     { --_optimization :: Optimization
     -- , _pragmas      :: Map Text Pragma
     -- , _pretend      :: Bool
-     _pass         :: ConfigTree
+     _run          :: Bool
+    , _pass         :: ConfigTree
     -- , _report       :: ConfigTree
     } deriving (Show)
 
@@ -150,8 +152,9 @@ data BuildCfg = BuildCfg
 
 
 instance CmdParser BuildCfg where
-    parseCmd = (BuildCfg <$> configTreeParser)
-             <|> command "help"  (action printHelpAndExit) id
+    parseCmd = addHelp $ BuildCfg
+           <$> flag "run" (help "Run the output program after successful compilation.")
+           <#> configTreeParser
 
 
 
@@ -217,8 +220,8 @@ data HelpOpts = HelpAboutConfig deriving (Show)
 
 data RunOpts = RunOpts deriving (Show)
 
--- instance CmdParser RunOpts where
---     parseCmd = pure RunOpts
+instance CmdParser RunOpts where
+    parseCmd = pure RunOpts
 
 
 -- === Version === --
@@ -246,9 +249,25 @@ data RootCmd = Build   BuildCfg
 
 
 rootCmd :: Parser RootCmd
-rootCmd = subcommand "build" Build (help "Compile packages and dependencies.")
-      <|> subcommand "clean" Clean (help "Remove compilation cache.")
-      <|>    command "help"  (action printHelpAndExit) id
+rootCmd = subcommand "build"   Build   (help "Compile packages and dependencies.")
+      <|> subcommand "clean"   Clean   (help "Clean compilation cache.")
+      <|> subcommand "install" Install (help "Compile and install packages and dependencies.")
+      <|> subcommand "run"     Run     (help "Compile and run Luna programs.")
+      <|> command    "help"  helpCmd (help $ "Access help information." </> "Use `luna help topics` for extra help topics.")
+
+helpCmd :: Parser a
+helpCmd = helpTopicsCmd
+      <|> command_ "topics" (action $ printHelpAndExit helpTopicsCmd)
+      <|> action  (printHelpAndExit rootCmd)
+
+
+helpTopicsCmd :: Parser a
+helpTopicsCmd = helpTopic "generic-config" "hello" (help "Using generic interface for setting configuration.")
+
+helpTopic :: Text -> Text -> (ArgConfig -> ArgConfig) -> Parser a
+helpTopic n s f = command n (action $ print s >> liftIO exitSuccess) (f . tag_ "help-topic")
+
+
 -- rootCmd = subparser (mconcat [ commandGroup "Compilation:", metavar "command"
 --           , command "build"    . cmdInfo Build   $ progDesc "Compile packages and dependencies."
 --           , command "clean"    . cmdInfo Clean   $ progDesc "Remove compilation cache."
@@ -267,14 +286,18 @@ rootCmd = subcommand "build" Build (help "Compile packages and dependencies.")
 
 subcommand n t = command n (t <$> parseCmd)
 
-addHelp :: (MonadIO m, HasTags t, HasMaybeLabel t, HasMaybeHelp t, HasMaybeMetavar t, Default t, Token m ~ Char, MonadTokenParser m, MonadProgressParser m, Alternative m) 
-        => FreeParserT t m a -> FreeParserT t m a
-addHelp p = p <|> command "help" (action printHelpAndExit) id where
-    printHelpAndExit = liftIO $ outputHelp [("command", "Available commands:")] p >> exitSuccess
+addHelp :: (OptParserT t m, HelpProvider t, MonadIO m) => FreeParserT t m a -> FreeParserT t m a
+addHelp p = p <|> command_ "help" (action $ printHelpAndExit p)
 
+-- printHelpAndExit :: MonadIO m => m a
+-- printHelpAndExit = liftIO $ outputHelp [("command", "Available commands:"), ("option", "Available options:")] rootCmd >> exitSuccess
 
-printHelpAndExit :: MonadIO m => m a
-printHelpAndExit = liftIO $ outputHelp [("command", "Available commands:")] rootCmd >> exitSuccess
+printHelpAndExit :: (HelpProvider t, MonadIO m) => FreeParserT t n x -> m a
+printHelpAndExit p = liftIO $ outputHelp titleTagMap p >> exitSuccess where
+    titleTagMap = [ (,) "command"    "Available commands:"
+                  , (,) "option"     "Available options:"
+                  , (,) "help-topic" "Available help topics:"
+                  ]
 
 
 -------------------
@@ -287,7 +310,7 @@ main = do
     -- putStrLn "----------------"
     args <- System.getArgs
     if null args
-        then printHelpAndExit
+        then printHelpAndExit rootCmd
         else runOptionParser rootCmd args
     -- putStrLn ""
 

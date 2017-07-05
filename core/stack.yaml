@@ -31,7 +31,7 @@ packages:
 - extra-dep: true
   location: {commit: 53538017ad47a0a473233577595d8ac6e3eae9a0, git: 'https://github.com/luna/poly-control.git'}
 - extra-dep: true
-  location: {commit: 64179d2492e68016fb34d09b6faf966f3b9f91bd, git: 'https://github.com/luna/prologue.git'}
+  location: {commit: 4ea82e481812ffce49c044e1e84d99e19c08bc2f, git: 'https://github.com/luna/prologue.git'}
 - extra-dep: true
   location: {commit: 7c9eab45f65ab98290282e11d19e39401830ab9c, git: 'https://github.com/luna/type-cache.git'}
 - extra-dep: true
@@ -51,5 +51,5 @@ packages:
 - extra-dep: true
   location: {commit: e8dfa519660ae1174e7e28ae7d74f85955bfa415, git: 'https://github.com/luna/text-processing'}
 - extra-dep: true
-  location: {commit: 4be3226e81cae6a46ae52d2756cfe6ccc11f2b2f, git: 'https://github.com/luna/terminal-text'}
+  location: {commit: 86d570a900c3f5e86d3089100444cc0a678340a3, git: 'https://github.com/luna/terminal-text'}
 resolver: lts-8.2
