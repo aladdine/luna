@@ -91,7 +91,7 @@ configTreeParser = foldr (uncurry Map.insert) mempty <$> multiple optSetParser
 
 fullOptSetParser :: Parser (Text, Text)
 fullOptSetParser = sub $ (,)
-    <$> strOption "--" "set" (help $ "Set configuration options." </> "Use `luna help generic-config` to learn more.")
+    <$> strOption "++" "set" (help $ "Set configuration options." </> "Use `luna help generic-config` to learn more.")
     <*> arg (convert <$> lexeme anyWord) id
 
 shortOptSwitchParser :: Char -> Text -> (ArgConfig -> ArgConfig) -> Parser (Text, Text)
@@ -104,7 +104,7 @@ shortOptDisableParser = shortOptSwitchParser '-' "false" (help "Shortcut for --s
 shortOptEnableParser  = shortOptSwitchParser '+' "true"  (help "Shortcut for --set opt.enabled true")
 
 optSetParser :: Parser (Text, Text)
-optSetParser = fullOptSetParser <|> shortOptDisableParser <|> shortOptEnableParser
+optSetParser = fullOptSetParser -- <|> shortOptDisableParser <|> shortOptEnableParser
 
 -- luna build --set pass.analysis.simpleaa.enabled   true
 -- luna build +pass.analysis.simpleaa
@@ -277,10 +277,10 @@ instance FromJSON RootCmd
 
 rootCmd :: Parser RootCmd
 rootCmd = subcommand "build"   Build   (help "Compile packages and dependencies.")
-      <|> subcommand "clean"   Clean   (help "Clean compilation cache.")
-      <|> subcommand "install" Install (help "Compile and install packages and dependencies.")
-      <|> subcommand "run"     Run     (help "Compile and run Luna programs.")
-      <|> command    "help"  helpCmd (help $ "Access help information." </> "Use `luna help topics` for extra help topics.")
+    --   <|> subcommand "clean"   Clean   (help "Clean compilation cache.")
+    --   <|> subcommand "install" Install (help "Compile and install packages and dependencies.")
+    --   <|> subcommand "run"     Run     (help "Compile and run Luna programs.")
+    --   <|> command    "help"  helpCmd (help $ "Access help information." </> "Use `luna help topics` for extra help topics.")
 
 helpCmd :: Parser a
 helpCmd = helpTopicsCmd
