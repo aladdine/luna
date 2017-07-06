@@ -35,6 +35,8 @@ executables:
       - cmd
       - parsert
       - layouting
+      - aeson-diff
+      - lens-utils
 
 default-extensions:
     - AllowAmbiguousTypes

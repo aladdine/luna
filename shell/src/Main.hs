@@ -10,12 +10,18 @@ import qualified Data.Map  as Map
 import qualified Data.Text as Text
 import qualified System.Environment as System
 
+import Control.Lens.Aeson
 import System.Console.Options hiding (main)
 import qualified System.Console.Options as O
 import System.Exit (exitSuccess, exitFailure)
 import Text.Parsert hiding (option)
 import qualified Data.Layout        as Doc
 import           Data.Layout        ((<+>), (</>), (<//>))
+
+import qualified Data.Aeson         as Aeson
+import           Data.Aeson         (ToJSON, toJSON, FromJSON, fromJSON)
+import qualified Data.Aeson.Diff    as Aeson
+import qualified Data.Aeson.Pointer as Aeson
 
 -- class Pretty a where
 --     showPretty :: a -> Text
@@ -146,70 +152,84 @@ data BuildCfg = BuildCfg
      _run          :: Bool
     , _pass         :: ConfigTree
     -- , _report       :: ConfigTree
-    } deriving (Show)
+    } deriving (Generic, Show)
 
 -- stats
-
-
+instance ToJSON    BuildCfg where toEncoding = lensJSONToEncoding; toJSON = lensJSONToJSON
+instance FromJSON  BuildCfg where parseJSON  = lensJSONParse
 instance CmdParser BuildCfg where
-    parseCmd = addHelp $ BuildCfg
+    parseCmd = addHelp' $ (\cfg sets -> cfg) <$> ((\x -> BuildCfg x mempty)
            <$> flag "run" (help "Run the output program after successful compilation.")
-           <#> configTreeParser
+           ) <#> multiple optSetParser
 
-
+-- configTreeParser
 
 -- === Clean === --
 
-data CleanOpts = CleanOpts deriving (Show)
+data CleanOpts = CleanOpts deriving (Generic, Show)
 
+instance ToJSON    CleanOpts
+instance FromJSON  CleanOpts
 instance CmdParser CleanOpts where
     parseCmd = pure CleanOpts
 
 
 -- === Doc === --
 
-data DocOpts = DocOpts deriving (Show)
+data DocOpts = DocOpts deriving (Generic, Show)
 
+instance ToJSON    DocOpts
+instance FromJSON  DocOpts
 instance CmdParser DocOpts where
     parseCmd = pure DocOpts
 
 
 -- === Env === --
 
-data EnvOpts = EnvOpts deriving (Show)
+data EnvOpts = EnvOpts deriving (Generic, Show)
 
+instance ToJSON    EnvOpts
+instance FromJSON  EnvOpts
 instance CmdParser EnvOpts where
     parseCmd = pure EnvOpts
 
 
 -- === Install === --
 
-data InstallOpts = InstallOpts deriving (Show)
+data InstallOpts = InstallOpts deriving (Generic, Show)
 
+instance ToJSON    InstallOpts
+instance FromJSON  InstallOpts
 instance CmdParser InstallOpts where
     parseCmd = pure InstallOpts
 
 
 -- === New === --
 
-data NewOpts = NewOpts deriving (Show)
+data NewOpts = NewOpts deriving (Generic, Show)
 
+instance ToJSON    NewOpts
+instance FromJSON  NewOpts
 instance CmdParser NewOpts where
     parseCmd = pure NewOpts
 
 
 -- === Package === --
 
-data PackageOpts = PackageOpts deriving (Show)
+data PackageOpts = PackageOpts deriving (Generic, Show)
 
+instance ToJSON    PackageOpts
+instance FromJSON  PackageOpts
 instance CmdParser PackageOpts where
     parseCmd = pure PackageOpts
 
 
 -- === Help === --
 
-data HelpOpts = HelpAboutConfig deriving (Show)
+data HelpOpts = HelpAboutConfig deriving (Generic, Show)
 
+instance ToJSON    HelpOpts
+instance FromJSON  HelpOpts
 -- instance CmdParser HelpOpts where
 --     parseCmd = subparser (mconcat [ commandGroup "Help topics:", metavar "topic"
             --   , command "configuration" . info (pure HelpAboutConfig)   $ progDesc "Luna toolkit configuration management."
@@ -218,16 +238,20 @@ data HelpOpts = HelpAboutConfig deriving (Show)
 
 -- === Run === --
 
-data RunOpts = RunOpts deriving (Show)
+data RunOpts = RunOpts deriving (Generic, Show)
 
+instance ToJSON    RunOpts
+instance FromJSON  RunOpts
 instance CmdParser RunOpts where
     parseCmd = pure RunOpts
 
 
 -- === Version === --
 
-data VersionOpts = VersionOpts deriving (Show)
+data VersionOpts = VersionOpts deriving (Generic, Show)
 
+instance ToJSON    VersionOpts
+instance FromJSON  VersionOpts
 -- instance CmdParser VersionOpts where
 --     parseCmd = pure VersionOpts
 
@@ -245,7 +269,10 @@ data RootCmd = Build   BuildCfg
              | Help    HelpOpts
              | Run     RunOpts
              | Version VersionOpts
-             deriving (Show)
+             deriving (Generic, Show)
+
+instance ToJSON   RootCmd
+instance FromJSON RootCmd
 
 
 rootCmd :: Parser RootCmd
@@ -289,6 +316,9 @@ subcommand n t = command n (t <$> parseCmd)
 addHelp :: (OptParserT t m, HelpProvider t, MonadIO m) => FreeParserT t m a -> FreeParserT t m a
 addHelp p = p <|> command_ "help" (action $ printHelpAndExit p)
 
+addHelp' :: (OptParserT t m, HelpProvider t, MonadIO m) => FreeParserT t m a -> FreeParserT t m a
+addHelp' p = command_ "help" (action $ printHelpAndExit p) <|> p
+
 -- printHelpAndExit :: MonadIO m => m a
 -- printHelpAndExit = liftIO $ outputHelp [("command", "Available commands:"), ("option", "Available options:")] rootCmd >> exitSuccess
 
@@ -304,6 +334,16 @@ printHelpAndExit p = liftIO $ outputHelp titleTagMap p >> exitSuccess where
 -- === Shell === --
 -------------------
 
+
+updateCfg :: (FromJSON a, ToJSON a) => [Text] -> Text -> a -> Aeson.Result a
+updateCfg path val a = fromJSON =<< newVal where
+    newVal  = Aeson.patch diff (toJSON a)
+    diff    = Aeson.Patch [Aeson.Rep (Aeson.Pointer (Aeson.OKey <$> path)) (mkVal val)]
+    mkVal   = \case
+        "true"  -> Aeson.Bool True
+        "false" -> Aeson.Bool False
+        s       -> Aeson.String s
+
 main :: IO ()
 main = do
     -- O.main
@@ -311,7 +351,24 @@ main = do
     args <- System.getArgs
     if null args
         then printHelpAndExit rootCmd
-        else runOptionParser rootCmd args
+        else do
+            out <- runOptionParser rootCmd args
+            putStrLn . convert $ Aeson.encode out
+            print $ updateCfg ["contents", "run"] "true" out
+
+            -- let Just newVal = Aeson.decode "{\"contents\": {\"_run\": true}}" :: Maybe Aeson.Value
+            --     -- diff   = Aeson.diff (Aeson.Object mempty) newVal
+            --     diff   = Aeson.Patch [Aeson.Rep (Aeson.Pointer [Aeson.OKey "contents", Aeson.OKey "_run"]) (Aeson.Bool True)]
+            --     newObj = Aeson.patch diff (toJSON out)
+            --     newOut = fromJSON =<< newObj
+            -- print diff
+            -- pprint (toJSON out)
+            -- pprint newObj
+            -- print (newOut :: Aeson.Result RootCmd)
+
+
+-- runOptionParser :: MonadIO m => ParserT m a -> [String] -> m a
+
     -- putStrLn ""
 
     -- opts <- handleParseResult $ execParserPure prefs pinfo (preprocessArgs args)
