@@ -2,7 +2,7 @@
 
 module Main where
 
-import Luna.Prelude hiding (Level, switch, argument)
+import Luna.Prelude hiding (Level, switch, argument, (<+>))
 import qualified Luna.Shell
 import qualified Data.List as List
 import           Data.Map (Map)
@@ -83,32 +83,87 @@ class CmdParser a where
 --     readPretty s = mapLeft (const . convert $ "Unexpected pass command '" <> s <> "'. Expecting 'enable' or 'disable'.") . tryReads $ Text.toTitle s
 
 
+--------------------
+-- === Errors === --
+--------------------
+
+-- === WrongConfPathError === --
+
+newtype WrongConfPathError = WrongConfPathError Text deriving (Show)
+makeLenses ''WrongConfPathError
+
+wrongConfPathError :: Text -> SomeError
+wrongConfPathError = toSomeError . WrongConfPathError
+
+instance IsError WrongConfPathError where
+    renderError e  = "Wrong configuration path:" <+> convert (unwrap e)
+
+
+
+---------------------------------------
+-- === Generic config management === --
+---------------------------------------
+
+-- === Config update === --
+
+updateCfg :: (FromJSON a, ToJSON a) => [Text] -> Text -> a -> Either Text a
+updateCfg path val a = convert1 $ fromJSON =<< newVal where
+    newVal  = Aeson.patch diff (toJSON a)
+    diff    = Aeson.Patch [Aeson.Rep (Aeson.Pointer (Aeson.OKey <$> path)) (mkVal val)]
+    mkVal   = \case
+        "true"  -> Aeson.Bool True
+        "false" -> Aeson.Bool False
+        s       -> Aeson.String s
+
+updateCfgM :: (FromJSON a, ToJSON a, MonadErrorParser SomeError m) => [Text] -> Text -> a -> m a
+updateCfgM = either (raise . wrongConfPathError) return .:. updateCfg
+
+
+-- === Parsers === --
+
+fullOptSetParser :: Parser ([Text], Text)
+fullOptSetParser = subParser $ (,) . Text.splitOn "."
+    <$> strOption "--" "set" (help $ "Set configuration options." </> "Use `luna help generic-config` to learn more.")
+    <*> argument (convert <$> lexeme anyWord) id
+
+shortOptSwitchParser :: Char -> Text -> (ArgConfig -> ArgConfig) -> Parser ([Text], Text)
+shortOptSwitchParser pfx val cfg = subParser $ ((,val) . (<> ["enabled"]) . Text.splitOn ".")
+    <$  argument (token pfx <* notFollowedBy (token pfx)) (cfg . tag "option" . label (convert pfx <> " " <> "opt"))
+    <*> argument (convert <$> lexeme anyWord) id
+
+shortOptDisableParser, shortOptEnableParser :: Parser ([Text], Text)
+shortOptDisableParser = shortOptSwitchParser '-' "false" (help "Shortcut for --set opt.enabled false")
+shortOptEnableParser  = shortOptSwitchParser '+' "true"  (help "Shortcut for --set opt.enabled true")
+
+optSetParser :: Parser ([Text], Text)
+optSetParser = fullOptSetParser <|> shortOptDisableParser <|> shortOptEnableParser
+
+handleGenConf :: (FromJSON a, ToJSON a) => Parser a -> Parser a
+handleGenConf p = bindParser (uncurry $ foldM (flip $ uncurry updateCfgM))
+                $ (,) <$> p <#> multiple optSetParser
+
+
+-- === Aeson utils === --
+
+-- TODO: We might want to generalize them
+instance IsString e => Convertible1 Aeson.Result (Either e) where
+    convert1 = \case
+        Aeson.Success a -> Right a
+        Aeson.Error   e -> Left $ fromString e
+
+
+
 ------------------------
 -- === ConfigTree === --
 ------------------------
 
 type ConfigTree = Map Text Text
 
-configTreeParser :: Parser ConfigTree
-configTreeParser = foldr (uncurry Map.insert) mempty <$> multiple optSetParser
+-- configTreeParser :: Parser ConfigTree
+-- configTreeParser = foldr (uncurry Map.insert) mempty <$> multiple optSetParser
 
 
-fullOptSetParser :: Parser (Text, Text)
-fullOptSetParser = sub $ (,)
-    <$> strOption "--" "set" (help $ "Set configuration options." </> "Use `luna help generic-config` to learn more.")
-    <*> arg (convert <$> lexeme anyWord) id
 
-shortOptSwitchParser :: Char -> Text -> (ArgConfig -> ArgConfig) -> Parser (Text, Text)
-shortOptSwitchParser pfx val cfg = sub $ ((,val) . (<> ".enabled"))
-    <$  arg (token pfx <* notFollowedBy (token pfx)) (cfg . tag "option" . label (convert pfx <> " " <> "opt"))
-    <*> arg (convert <$> lexeme anyWord) id
-
-shortOptDisableParser, shortOptEnableParser :: Parser (Text, Text)
-shortOptDisableParser = shortOptSwitchParser '-' "false" (help "Shortcut for --set opt.enabled false")
-shortOptEnableParser  = shortOptSwitchParser '+' "true"  (help "Shortcut for --set opt.enabled true")
-
-optSetParser :: Parser (Text, Text)
-optSetParser = fullOptSetParser <|> shortOptDisableParser <|> shortOptEnableParser
 
 -- luna build --set pass.analysis.simpleaa.enabled   true
 -- luna build +pass.analysis.simpleaa
@@ -154,17 +209,26 @@ data BuildCfg = BuildCfg
     -- , _pragmas      :: Map Text Pragma
     -- , _pretend      :: Bool
      _run          :: Bool
-    , _pass         :: ConfigTree
+    , _pass        :: ConfigTree
     -- , _report       :: ConfigTree
     } deriving (Generic, Show)
+
+buildCfgPCons :: Bool -> BuildCfg
+buildCfgPCons run = BuildCfg run mempty
 
 -- stats
 instance ToJSON    BuildCfg where toEncoding = lensJSONToEncoding; toJSON = lensJSONToJSON
 instance FromJSON  BuildCfg where parseJSON  = lensJSONParse
 instance CmdParser BuildCfg where
-    parseCmd = addHelp' $ (\cfg sets -> cfg) <$> ((\x -> BuildCfg x mempty)
-           <$> flag "run" (help "Run the output program after successful compilation.")
-           ) <#> multiple optSetParser
+    parseCmd = addHelp'
+             $ handleGenConf
+             $ buildCfgPCons <$> flag "run" (help "Run the output program after successful compilation.")
+
+
+
+-- updateCfg :: (FromJSON a, ToJSON a) => [Text] -> Text -> a -> Either Text a
+-- foldM :: Monad m => (a -> b -> m a) -> a -> [b] -> m a
+-- bindParser :: Monad m => (x -> m a) -> FreeParserT t m x -> FreeParserT t m a
 
 -- configTreeParser
 
@@ -339,14 +403,13 @@ printHelpAndExit p = liftIO $ outputHelp titleTagMap p >> exitSuccess where
 -------------------
 
 
-updateCfg :: (FromJSON a, ToJSON a) => [Text] -> Text -> a -> Aeson.Result a
-updateCfg path val a = fromJSON =<< newVal where
-    newVal  = Aeson.patch diff (toJSON a)
-    diff    = Aeson.Patch [Aeson.Rep (Aeson.Pointer (Aeson.OKey <$> path)) (mkVal val)]
-    mkVal   = \case
-        "true"  -> Aeson.Bool True
-        "false" -> Aeson.Bool False
-        s       -> Aeson.String s
+
+
+
+
+
+
+
 
 main :: IO ()
 main = do
@@ -357,8 +420,9 @@ main = do
         then printHelpAndExit rootCmd
         else do
             out <- runOptionParser rootCmd args
-            putStrLn . convert $ Aeson.encode out
-            print $ updateCfg ["contents", "run"] "true" out
+            print out
+            -- putStrLn . convert $ Aeson.encode out
+            -- print $ updateCfg ["contents", "run"] "true" out
 
             -- let Just newVal = Aeson.decode "{\"contents\": {\"_run\": true}}" :: Maybe Aeson.Value
             --     -- diff   = Aeson.diff (Aeson.Object mempty) newVal
