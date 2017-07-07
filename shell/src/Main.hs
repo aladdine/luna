@@ -10,7 +10,7 @@ import qualified Data.Map  as Map
 import qualified Data.Text as Text
 import qualified System.Environment as System
 
-import Control.Lens.Aeson
+import qualified Control.Lens.Aeson as Lens
 import System.Console.Options hiding (main)
 import qualified System.Console.Options as O
 import System.Exit (exitSuccess, exitFailure)
@@ -26,6 +26,10 @@ import Control.Monad.Branch
 
 import qualified Text.Parsert as Parsert
 import Text.Parsert
+
+
+instance Convertible Bool String where convert = show
+instance Convertible Bool Text   where convert = convertVia @String
 
 -- class Pretty a where
 --     showPretty :: a -> Text
@@ -110,10 +114,10 @@ updateCfg :: (FromJSON a, ToJSON a) => [Text] -> Text -> a -> Either Text a
 updateCfg path val a = convert1 $ fromJSON =<< newVal where
     newVal  = Aeson.patch diff (toJSON a)
     diff    = Aeson.Patch [Aeson.Rep (Aeson.Pointer (Aeson.OKey <$> path)) (mkVal val)]
-    mkVal   = \case
+    mkVal s = case Text.toLower s of
         "true"  -> Aeson.Bool True
         "false" -> Aeson.Bool False
-        s       -> Aeson.String s
+        _       -> Aeson.String s
 
 updateCfgM :: (FromJSON a, ToJSON a, MonadErrorParser SomeError m) => [Text] -> Text -> a -> m a
 updateCfgM = either (raise . wrongConfPathError) return .:. updateCfg
@@ -141,6 +145,10 @@ optSetParser = fullOptSetParser <|> shortOptDisableParser <|> shortOptEnablePars
 handleGenConf :: (FromJSON a, ToJSON a) => Parser a -> Parser a
 handleGenConf p = bindParser (uncurry $ foldM (flip $ uncurry updateCfgM))
                 $ (,) <$> p <#> multiple optSetParser
+
+handleGenConf' :: (FromJSON a, ToJSON a) => Parser (a, [([Text], Text)]) -> Parser a
+handleGenConf' p = bindParser (uncurry $ foldM (flip $ uncurry updateCfgM))
+                 $ flip ((_2 %~) . flip (<>)) <$> p <#> multiple optSetParser
 
 
 -- === Aeson utils === --
@@ -204,27 +212,58 @@ data Optimization = None
 --                     --    ,
 --                        }
 
+newtype Switch = Switch { _enabled :: Bool } deriving (Generic, Show)
+makeLenses ''Switch
+
+instance ToJSON   Switch where toEncoding = Lens.toEncoding; toJSON = Lens.toJSON
+instance FromJSON Switch where parseJSON  = Lens.parse
+
+
+-- data Hook = Hook 
+--     { _enabled :: Bool
+--     , _options :: Map Text Text
+--     } deriving (Generic, Show)
+
+data BuildHooks = BuildHooks
+    { _after :: AfterBuildHooks
+    } deriving (Generic, Show)
+
+data AfterBuildHooks = AfterBuildHooks
+    { _run :: Switch
+    } deriving (Generic, Show)
+
 data BuildCfg = BuildCfg
     { --_optimization :: Optimization
     -- , _pragmas      :: Map Text Pragma
     -- , _pretend      :: Bool
-     _run          :: Bool
+     _hooks        :: BuildHooks
     , _pass        :: ConfigTree
     -- , _report       :: ConfigTree
     } deriving (Generic, Show)
+makeLenses ''BuildCfg
+makeLenses ''BuildHooks
+makeLenses ''AfterBuildHooks
 
-buildCfgPCons :: Bool -> BuildCfg
-buildCfgPCons run = BuildCfg run mempty
+instance Mempty BuildCfg where
+    mempty = BuildCfg (BuildHooks $ AfterBuildHooks $ Switch $ False) mempty
 
 -- stats
-instance ToJSON    BuildCfg where toEncoding = lensJSONToEncoding; toJSON = lensJSONToJSON
-instance FromJSON  BuildCfg where parseJSON  = lensJSONParse
+instance ToJSON    BuildHooks      where toEncoding = Lens.toEncoding; toJSON = Lens.toJSON
+instance ToJSON    AfterBuildHooks where toEncoding = Lens.toEncoding; toJSON = Lens.toJSON
+instance ToJSON    BuildCfg        where toEncoding = Lens.toEncoding; toJSON = Lens.toJSON
+instance FromJSON  BuildHooks      where parseJSON  = Lens.parse
+instance FromJSON  AfterBuildHooks where parseJSON  = Lens.parse
+instance FromJSON  BuildCfg        where parseJSON  = Lens.parse
+
 instance CmdParser BuildCfg where
     parseCmd = addHelp'
-             $ handleGenConf
-             $ buildCfgPCons <$> flag "run" (help "Run the output program after successful compilation.")
+             $ handleGenConf' . fmap (mempty,)
+             $ pure <$> (confAlias "hooks.after.run.enabled" <$> flag "run" (help "Run the output program after successful compilation."))
 
-
+ --  $ (\r -> mempty & hooks.after.run.enabled .~ r) <$> flag "run" (help "Run the output program after successful compilation.")
+--
+confAlias :: Convertible' t Text => Text -> t -> ([Text],Text)
+confAlias s = ((,) . Text.splitOn ".") s . convert'
 
 -- updateCfg :: (FromJSON a, ToJSON a) => [Text] -> Text -> a -> Either Text a
 -- foldM :: Monad m => (a -> b -> m a) -> a -> [b] -> m a
@@ -345,10 +384,10 @@ instance FromJSON RootCmd
 
 rootCmd :: Parser RootCmd
 rootCmd = subcommand "build"   Build   (help "Compile packages and dependencies.")
-    --   <|> subcommand "clean"   Clean   (help "Clean compilation cache.")
-    --   <|> subcommand "install" Install (help "Compile and install packages and dependencies.")
-    --   <|> subcommand "run"     Run     (help "Compile and run Luna programs.")
-    --   <|> command    "help"  helpCmd (help $ "Access help information." </> "Use `luna help topics` for extra help topics.")
+      <|> subcommand "clean"   Clean   (help "Clean compilation cache.")
+      <|> subcommand "install" Install (help "Compile and install packages and dependencies.")
+      <|> subcommand "run"     Run     (help "Compile and run Luna programs.")
+      <|> command    "help"    helpCmd (help $ "Access help information." </> "Use `luna help topics` for extra help topics.")
 
 helpCmd :: Parser a
 helpCmd = helpTopicsCmd
@@ -415,26 +454,16 @@ main :: IO ()
 main = do
     -- O.main
     -- putStrLn "----------------"
+    let m = fromList [("a","b")] :: Map Text Text
+    print $ Aeson.encode m
+
     args <- System.getArgs
     if null args
         then printHelpAndExit rootCmd
         else do
             out <- runOptionParser rootCmd args
             print out
-            -- putStrLn . convert $ Aeson.encode out
-            -- print $ updateCfg ["contents", "run"] "true" out
 
-            -- let Just newVal = Aeson.decode "{\"contents\": {\"_run\": true}}" :: Maybe Aeson.Value
-            --     -- diff   = Aeson.diff (Aeson.Object mempty) newVal
-            --     diff   = Aeson.Patch [Aeson.Rep (Aeson.Pointer [Aeson.OKey "contents", Aeson.OKey "_run"]) (Aeson.Bool True)]
-            --     newObj = Aeson.patch diff (toJSON out)
-            --     newOut = fromJSON =<< newObj
-            -- print diff
-            -- pprint (toJSON out)
-            -- pprint newObj
-            -- print (newOut :: Aeson.Result RootCmd)
-    -- print =<< runTest7
-    -- return ()
 
 runTest7 :: IO (Either (NonEmpty String) (String,String))
 runTest7 = runBranchBreaker
