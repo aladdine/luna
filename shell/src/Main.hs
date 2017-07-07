@@ -22,6 +22,10 @@ import qualified Data.Aeson         as Aeson
 import           Data.Aeson         (ToJSON, toJSON, FromJSON, fromJSON)
 import qualified Data.Aeson.Diff    as Aeson
 import qualified Data.Aeson.Pointer as Aeson
+import Control.Monad.Branch
+
+import qualified Text.Parsert as Parsert
+import Text.Parsert
 
 -- class Pretty a where
 --     showPretty :: a -> Text
@@ -91,7 +95,7 @@ configTreeParser = foldr (uncurry Map.insert) mempty <$> multiple optSetParser
 
 fullOptSetParser :: Parser (Text, Text)
 fullOptSetParser = sub $ (,)
-    <$> strOption "++" "set" (help $ "Set configuration options." </> "Use `luna help generic-config` to learn more.")
+    <$> strOption "--" "set" (help $ "Set configuration options." </> "Use `luna help generic-config` to learn more.")
     <*> arg (convert <$> lexeme anyWord) id
 
 shortOptSwitchParser :: Char -> Text -> (ArgConfig -> ArgConfig) -> Parser (Text, Text)
@@ -104,7 +108,7 @@ shortOptDisableParser = shortOptSwitchParser '-' "false" (help "Shortcut for --s
 shortOptEnableParser  = shortOptSwitchParser '+' "true"  (help "Shortcut for --set opt.enabled true")
 
 optSetParser :: Parser (Text, Text)
-optSetParser = fullOptSetParser -- <|> shortOptDisableParser <|> shortOptEnableParser
+optSetParser = fullOptSetParser <|> shortOptDisableParser <|> shortOptEnableParser
 
 -- luna build --set pass.analysis.simpleaa.enabled   true
 -- luna build +pass.analysis.simpleaa
@@ -365,7 +369,17 @@ main = do
             -- pprint (toJSON out)
             -- pprint newObj
             -- print (newOut :: Aeson.Result RootCmd)
+    -- print =<< runTest7
+    -- return ()
 
+runTest7 :: IO (Either (NonEmpty String) (String,String))
+runTest7 = runBranchBreaker
+         $ evalBacktracker
+         $ runFailParser
+         $ evalStreamProvider (listStream "bazzz")
+         $ evalOffsetRegister
+        --  $ (tokens "ba" <|> tokens "b")
+         $ (,) <$> branched (tokens "ba") <*> (tokens "b")
 
 -- runOptionParser :: MonadIO m => ParserT m a -> [String] -> m a
 

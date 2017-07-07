@@ -35,6 +35,7 @@ packages:
     - ../../libs/terminal-text
     - ../../libs/layouting
     - ../../libs/cmd
+    - ../../libs/monad-branch
 
     - ../../libs/visualization-api
 

@@ -37,6 +37,7 @@ executables:
       - layouting
       - aeson-diff
       - lens-utils
+      - monad-branch
 
 default-extensions:
     - AllowAmbiguousTypes
