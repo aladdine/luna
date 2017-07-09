@@ -1,3 +1,4 @@
+{-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Main where
@@ -38,6 +39,8 @@ import           Data.Set (Set)
 import qualified Data.Aeson.Lens
 import qualified Data.HashMap.Lazy as HashMap
 import qualified Data.Vector       as Vector
+
+-- import Control.Monad.Trans.Either (bimapEitherT)
 
 instance Convertible Bool String where convert = show
 instance Convertible Bool Text   where convert = convertVia @String
@@ -467,15 +470,20 @@ printHelpAndExit p = liftIO $ outputHelp titleTagMap p >> exitSuccess where
                   , (,) "help-topic" "Available help topics:"
                   ]
 
-
 -------------------
 -- === Shell === --
 -------------------
 
+
+-- bimapEitherT :: Functor m => (e -> f) -> (a -> b) -> EitherT e m a -> EitherT f m b
+
+-- mapLeftT :: (e -> e') -> EitherT e m a -> EitherT e' m a
+-- mapLeftT = flip bimapEitherT id
+
 --
 -- data Matched2   a = Matched2   (SolidTreeSet Text) a deriving (Show, Functor, Traversable, Foldable)
 -- data Unmatched2 a = Unmatched2 (Set Text) a          deriving (Show, Functor, Traversable, Foldable)
--- data Err2         = Err2       [Text] (Set Text)     deriving (Show)
+data Err2         = Err2       [Text] (Set Text)     deriving (Show)
 --
 -- data UpdateResult a = URMatched (Matched2 a)
 --                     | URErr     Err2
@@ -484,11 +492,33 @@ printHelpAndExit p = liftIO $ outputHelp titleTagMap p >> exitSuccess where
 -- data SearchResult a = SRMatched (Matched2 a)
 --                     |
 
+
 data Result a = Matched   (SolidTreeSet Text) a
               | Unmatched (Set Text) a
-              | Err       [Text] (Set Text)
+            --   | Err       [Text] (Set Text)
               deriving (Show, Functor, Traversable, Foldable)
 makeLenses ''Result
+
+newtype ResultT m a = ResultT (m (Result a)) deriving (Functor, Traversable, Foldable)
+makeLenses ''ResultT
+
+instance Monad m => Applicative (ResultT m) where
+    pure = wrap . pure . pure
+    f <*> a = wrap $ do
+        f' <- unwrap f
+        a' <- unwrap a
+        return $ f' <*> a'
+
+instance Monad m => Monad (ResultT m) where
+    a >>= f = wrap $ unwrap a >>= \case
+        Matched t s -> unwrap (f s) >>= return . \case
+            Matched   t' s' -> Matched (t <> t') s'
+            Unmatched _  s' -> Matched t         s'
+        Unmatched t s -> unwrap (f s) >>= return . \case
+            Matched   t' s' -> Matched   t'        s'
+            Unmatched t' s' -> Unmatched (t <> t') s'
+
+deriving instance Show (Unwrapped (ResultT m a)) => Show (ResultT m a)
 
 data Routed a = Routed [Text] (Set Text) (Result a) deriving (Show, Functor, Traversable, Foldable)
 
@@ -505,71 +535,70 @@ longerPath p p' = if pl > pl' then p else p' where
     pl  = length p
     pl' = length p'
 
-prepErrPath :: Text -> Result a -> Result a
-prepErrPath p = \case
-    -- Matched ps a -> Matched (TreeSet.singletonCons p ps) a
-    Err     e s  -> Err (p : e) s
-    a            -> a
+prepErrPath :: Text -> ResultT (Either Err2) a -> ResultT (Either Err2) a
+prepErrPath p = wrapped %~ mapLeft (\(Err2 e s) -> Err2 (p:e) s)
 
 prepPath :: Text -> Result a -> Result a
 prepPath p = \case
     Matched ps a -> Matched (TreeSet.singletonCons p ps) a
     a            -> a
 
-errToUnmatched :: a -> Result a -> Routed a
-errToUnmatched a = \case
-    Err e s -> Routed e s $ Unmatched s a
-    x       -> Routed mempty mempty x
+prepPathT :: Functor m => Text -> ResultT m a -> ResultT m a
+prepPathT p = wrapped %~ fmap go where
+    go = \case
+        Matched ps a -> Matched (TreeSet.singletonCons p ps) a
+        a            -> a
+
+errToUnmatched :: a -> ResultT (Either Err2) a -> Routed a
+errToUnmatched a r = case unwrap r of
+    Left (Err2 e s) -> Routed e s $ Unmatched s a
+    Right x         -> Routed mempty mempty x
 
 instance Applicative Result where
     pure = Unmatched mempty
-    Err e s      <*> _             = Err e s
-    _            <*> Err e s       = Err e s
     Matched   ps f <*> Matched ps' a = Matched (ps <> ps') (f a)
     Matched   ps f <*> Unmatched _ a = Matched ps (f a)
     Unmatched _  f <*> Matched   ps a = Matched ps (f a)
     Unmatched ps f <*> Unmatched ps' a = Unmatched (ps <> ps') (f a)
 
 instance Monad Result where
-    Err e s >>= f = Err e s
     Matched ps a >>= f = case f a of
         Matched   ps' a' -> Matched (ps <> ps') a'
         Unmatched _   a' -> Matched ps          a'
-        Err    e s       -> Err e s
     Unmatched ps a >>= f = case f a of
         Matched ps' a' -> Matched ps' a'
         Unmatched ps' a' -> Unmatched (ps <> ps') a'
-        Err e s          -> Err e s
 
 
 
-tstf :: Aeson.Value -> Result Aeson.Value
+tstf :: Aeson.Value -> ResultT (Either Err2) Aeson.Value
 tstf = \case
-    Aeson.String s -> Matched mempty $ Aeson.String "newVal"
+    Aeson.String s -> wrap $ Right $ Matched mempty $ Aeson.String "newVal"
 
 --
 -- updateCfg2 :: Ok | Err
 -- errToUnmatched :: Ok | Routed
 -- mapMValue :: Ok | Error | Unmatchedx
 
-updateCfg2 :: [Text] -> (Aeson.Value -> Result Aeson.Value) -> Aeson.Value -> Result Aeson.Value
+updateCfg2 :: [Text] -> (Aeson.Value -> ResultT (Either Err2) Aeson.Value) -> Aeson.Value -> ResultT (Either Err2) Aeson.Value
 updateCfg2 path f a = case path of
     []          -> f a
     ["*"]       -> error "todo"
     ["**"]      -> error "todo"
     ("*"  : ps) -> case val of
-        Matched ps a   -> Matched ps a
-        Unmatched ps a -> Err (p:xx) uu
-        Err    e s     -> error "impossible" -- Err (p:e) s
+        Matched ps a   -> wrap $ Right $ Matched ps a
+        Unmatched ps a -> wrap $ Left  $ Err2 (p:xx) uu
+        -- Err    e s     -> error "impossible" -- Err (p:e) s
         where p   = "*"
-              Routed xx uu val = mapMValue (\p a -> errToUnmatched a $ prepPath p $ updateCfg2 ps f a) a
+              Routed xx uu val = mapMValue (\p a -> errToUnmatched a $ prepPathT p $ updateCfg2 ps f a) a
             --   val = prepErrPath "*" $ mapMValue (\p a -> prepPath p $ errToUnmatched a $ updateCfg2 ps f a) a
     -- ("**" : ps) -> prepErrPath "**" $ mapMValue (\p -> prepPath p . updateCfg2 ps f) a
-    (p    : ps) -> case val of
-        Matched ps a   -> Matched (TreeSet.singletonCons p ps) a
-        Unmatched ps a -> Err [p] ps
-        Err    e s     -> Err (p:e) s
-        where val = mapMValue (\t -> if t == p then updateCfg2 ps f else Unmatched (Set.singleton t)) a
+    (p    : ps) -> case unwrap val of
+        Left (Err2 e s) -> wrap $ Left (Err2 (p:e) s)
+        Right a         -> case a of
+            Matched   ps a -> wrap $ Right $ Matched (TreeSet.singletonCons p ps) a
+            Unmatched ps a -> wrap $ Left $ Err2 [p] ps
+        where val = mapMValue (\t -> if t == p then updateCfg2 ps f else wrap . Right . Unmatched (Set.singleton t)) a
 
 
 
