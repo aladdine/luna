@@ -483,15 +483,19 @@ printHelpAndExit p = liftIO $ outputHelp titleTagMap p >> exitSuccess where
 
 --
 
+--------------------------
+-- === Projections === --
+--------------------------
+
+-- | Possible paths projections
+
+-- === Definition === --
+
 data Projections = Projections { _len :: Int, _paths :: Map [Text] (Set Text) } deriving (Show)
 makeLenses ''Projections
 
-instance Mempty Projections where mempty = Projections 0 $ fromList [([],mempty)]
-instance Semigroup Projections where
-    Projections l ps <> Projections l' ps' = if
-        | l == l' -> Projections l (Map.unionWith (<>) ps ps')
-        | l >  l' -> Projections l  ps
-        | l <  l' -> Projections l' ps'
+
+-- === Utils === --
 
 singletonProjection :: [Text] -> Set Text -> Projections
 singletonProjection p s = Projections (length p) $ fromList [(p,s)]
@@ -501,54 +505,51 @@ extendProjection t p = p & len   %~ succ
                          & paths %~ fromList . fmap (_1 %~ (t:)) . Map.assocs
 
 
-data Match   a = Match   { _matchTree   :: SolidTreeSet Text, _result      :: a } deriving (Show, Functor, Traversable, Foldable)
-data NoMatch a = NoMatch { _projections :: Projections      , _transResult :: a } deriving (Show, Functor, Traversable, Foldable)
-data Fail      = Fail      Projections     deriving (Show)
+-- === Instances === --
+
+instance Mempty Projections where mempty = Projections 0 $ fromList [([],mempty)]
+instance Semigroup Projections where
+    Projections l ps <> Projections l' ps' = if
+        | l == l' -> Projections l (Map.unionWith (<>) ps ps')
+        | l >  l' -> Projections l  ps
+        | l <  l' -> Projections l' ps'
+
+
+
+-------------------------------------
+-- === Object regex traversals === --
+-------------------------------------
+
+-- === Primitive result types === --
+
+data Match   a = Match   { _matchTree       :: SolidTreeSet Text, _result      :: a } deriving (Show, Functor, Traversable, Foldable)
+data NoMatch a = NoMatch { _projections     :: Projections      , _transResult :: a } deriving (Show, Functor, Traversable, Foldable)
+data Fail      = Fail    { _failProjections :: Projections                          } deriving (Show)
 
 makeLenses ''Match
+makeLenses ''NoMatch
+makeLenses ''Fail
 
---
--- data UpdateResult a = URMatched (Match a)
---                     | URErr     Fail
---                     deriving (Show, Functor, Traversable, Foldable)
---
--- data SearchResult a = SRMatched (Match a)
---                     |
-
-
--- ok :: Convertible1' Match t => SolidTreeSet Text -> a -> t a
--- ok = convert1' .: Match
--- instance Convertible1 Match Result where convert1 = MatchedResult
---
--- data ParResult a = MatchedParResult   (Match a)
---                  | UnmatchedParResult
+-- === Complex results === --
 
 data Result a = MatchedResult   (Match   a)
               | UnmatchedResult (NoMatch a)
               deriving (Show, Functor, Traversable, Foldable)
+
+newtype ResultT m a = ResultT (m (Result a)) deriving (Functor, Traversable, Foldable)
+
 makeLenses ''Result
+makeLenses ''ResultT
 
 pattern Matched   p a = MatchedResult   (Match   p a)
 pattern Unmatched p a = UnmatchedResult (NoMatch p a)
 
 
+-- === Utils === --
+
 mapUnmatched :: (NoMatch a -> NoMatch a) -> Result a -> Result a
 mapUnmatched f = \case MatchedResult   a -> MatchedResult a
                        UnmatchedResult a -> UnmatchedResult $ f a
-
-newtype ResultT m a = ResultT (m (Result a)) deriving (Functor, Traversable, Foldable)
-makeLenses ''ResultT
-
-instance Monad m => Applicative (ResultT m) where
-    pure    = wrap . pure . pure
-    f <*> a = wrap $ unwrap f <<*>> unwrap a
-
-instance Monad m => Monad (ResultT m) where
-    a >>= f = wrap . fmap join . join $ fmap sequence t where
-        t  = fmap2 (unwrap . f) $ unwrap a
-
-deriving instance Show (Unwrapped (ResultT m a)) => Show (ResultT m a)
-
 
 prepPath :: Text -> Result a -> Result a
 prepPath p = \case
@@ -558,11 +559,18 @@ prepPath p = \case
 prepPathT :: Functor m => Text -> ResultT m a -> ResultT m a
 prepPathT p = wrapped %~ fmap (prepPath p)
 
-
 errToUnmatched :: a -> ResultT (Either Fail) a -> Result a
 errToUnmatched a r = case unwrap r of
     Left  (Fail es) -> Unmatched es a
     Right s         -> s
+
+liftResult :: Either Fail (Match a) -> ResultT (Either Fail) a
+liftResult = wrap . fmap MatchedResult
+
+
+-- === Instances === --
+
+deriving instance Show (Unwrapped (ResultT m a)) => Show (ResultT m a)
 
 instance Applicative Result where
     pure                               = Unmatched mempty
@@ -577,17 +585,22 @@ instance Monad Result where
     Unmatched ps a >>= f = case f a of Matched   ps' a' -> Matched   ps'         a'
                                        Unmatched ps' a' -> Unmatched (ps <> ps') a'
 
+instance Monad m => Applicative (ResultT m) where
+    pure    = wrap . pure . pure
+    f <*> a = wrap $ unwrap f <<*>> unwrap a
 
-tstf :: Aeson.Value -> Either Fail (Match Aeson.Value)
-tstf = \case
-    Aeson.String s -> Right $ Match mempty $ Aeson.String "newVal"
+instance Monad m => Monad (ResultT m) where
+    a >>= f = wrap . fmap join . join $ fmap sequence t where
+        t  = fmap2 (unwrap . f) $ unwrap a
 
 
-liftToResult :: Either Fail (Match a) -> ResultT (Either Fail) a
-liftToResult = wrap . fmap MatchedResult
+
+--------------------------
+-- === Value update === --
+--------------------------
 
 tryUpdateValue :: [Text] -> (Aeson.Value -> Either Fail (Match Aeson.Value)) -> Text -> Aeson.Value -> Result Aeson.Value
-tryUpdateValue path f t a = errToUnmatched a $ prepPathT t $ liftToResult $ updateValue path f a
+tryUpdateValue path f t a = errToUnmatched a $ prepPathT t $ liftResult $ updateValue path f a
 
 updateValue :: [Text] -> (Aeson.Value -> Either Fail (Match Aeson.Value)) -> Aeson.Value -> Either Fail (Match Aeson.Value)
 updateValue path f a = case path of
@@ -599,7 +612,7 @@ updateValue path f a = case path of
         Left (Fail es) -> Left $ Fail (extendProjection p es)
         Right a        -> eitherMatched (matchTree %~ TreeSet.singletonCons p) (Fail . extendProjection p) a
         where val = flip mapMValue a $ \t -> if t == p
-                  then liftToResult . updateValue ps f
+                  then liftResult . updateValue ps f
                   else wrap . Right . Unmatched (singletonProjection [] $ Set.singleton t)
 
 eitherMatched :: (Match a -> r) -> (Projections -> e) -> Result a -> Either e r
@@ -616,6 +629,15 @@ mapMValue f = \case
     Aeson.Array  v -> Aeson.Array  <$> Vector.mapM (mapMValue f) v
     a              -> return a
 
+
+
+
+
+
+
+tstf :: Aeson.Value -> Either Fail (Match Aeson.Value)
+tstf = \case
+    Aeson.String s -> Right $ Match mempty $ Aeson.String "newVal"
 
 
 data Foo1 = Foo1 { _x :: Text
@@ -665,7 +687,7 @@ main = do
     pprint json
     -- pprint $ updateValue ["*", "*", "w"] tstf json
     -- pprint $ updateValue ["*", "*", "x"] tstf json
-    pprint $ updateValue ["bar1", "*", "w"] tstf json
+    pprint $ updateValue ["bar1", "*", "x"] tstf json
 
 
     args <- System.getArgs
