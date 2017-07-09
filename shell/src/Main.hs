@@ -1,4 +1,5 @@
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Main where
@@ -481,42 +482,44 @@ printHelpAndExit p = liftIO $ outputHelp titleTagMap p >> exitSuccess where
 -- mapLeftT = flip bimapEitherT id
 
 --
--- data Matched2   a = Matched2   (SolidTreeSet Text) a deriving (Show, Functor, Traversable, Foldable)
+data OK   a = OK { _path :: SolidTreeSet Text, _result :: a } deriving (Show, Functor, Traversable, Foldable)
 -- data Unmatched2 a = Unmatched2 (Set Text) a          deriving (Show, Functor, Traversable, Foldable)
-data Err2         = Err2       [Text] (Set Text)     deriving (Show)
+data Fail         = Fail       [Text] (Set Text)     deriving (Show)
+
+makeLenses ''OK
+
 --
--- data UpdateResult a = URMatched (Matched2 a)
---                     | URErr     Err2
+-- data UpdateResult a = URMatched (OK a)
+--                     | URErr     Fail
 --                     deriving (Show, Functor, Traversable, Foldable)
 --
--- data SearchResult a = SRMatched (Matched2 a)
+-- data SearchResult a = SRMatched (OK a)
 --                     |
 
 
-data Result a = Matched   (SolidTreeSet Text) a
-              | Unmatched (Set Text) a
-            --   | Err       [Text] (Set Text)
+-- ok :: Convertible1' OK t => SolidTreeSet Text -> a -> t a
+-- ok = convert1' .: OK
+-- instance Convertible1 OK Result where convert1 = MatchedResult
+
+data Result a = MatchedResult (OK a)
+              | Unmatched     (Set Text) a
               deriving (Show, Functor, Traversable, Foldable)
 makeLenses ''Result
+
+pattern Matched ps f = MatchedResult (OK ps f)
+
+
 
 newtype ResultT m a = ResultT (m (Result a)) deriving (Functor, Traversable, Foldable)
 makeLenses ''ResultT
 
 instance Monad m => Applicative (ResultT m) where
-    pure = wrap . pure . pure
-    f <*> a = wrap $ do
-        f' <- unwrap f
-        a' <- unwrap a
-        return $ f' <*> a'
+    pure    = wrap . pure . pure
+    f <*> a = wrap $ unwrap f <<*>> unwrap a
 
 instance Monad m => Monad (ResultT m) where
-    a >>= f = wrap $ unwrap a >>= \case
-        Matched t s -> unwrap (f s) >>= return . \case
-            Matched   t' s' -> Matched (t <> t') s'
-            Unmatched _  s' -> Matched t         s'
-        Unmatched t s -> unwrap (f s) >>= return . \case
-            Matched   t' s' -> Matched   t'        s'
-            Unmatched t' s' -> Unmatched (t <> t') s'
+    a >>= f = wrap . fmap join . join $ fmap sequence t where
+        t  = fmap2 (unwrap . f) $ unwrap a
 
 deriving instance Show (Unwrapped (ResultT m a)) => Show (ResultT m a)
 
@@ -535,8 +538,8 @@ longerPath p p' = if pl > pl' then p else p' where
     pl  = length p
     pl' = length p'
 
-prepErrPath :: Text -> ResultT (Either Err2) a -> ResultT (Either Err2) a
-prepErrPath p = wrapped %~ mapLeft (\(Err2 e s) -> Err2 (p:e) s)
+prepErrPath :: Text -> ResultT (Either Fail) a -> ResultT (Either Fail) a
+prepErrPath p = wrapped %~ mapLeft (\(Fail e s) -> Fail (p:e) s)
 
 prepPath :: Text -> Result a -> Result a
 prepPath p = \case
@@ -544,63 +547,58 @@ prepPath p = \case
     a            -> a
 
 prepPathT :: Functor m => Text -> ResultT m a -> ResultT m a
-prepPathT p = wrapped %~ fmap go where
-    go = \case
-        Matched ps a -> Matched (TreeSet.singletonCons p ps) a
-        a            -> a
+prepPathT p = wrapped %~ fmap (prepPath p)
 
-errToUnmatched :: a -> ResultT (Either Err2) a -> Routed a
+errToUnmatched :: a -> ResultT (Either Fail) a -> Routed a
 errToUnmatched a r = case unwrap r of
-    Left (Err2 e s) -> Routed e s $ Unmatched s a
+    Left (Fail e s) -> Routed e s $ Unmatched s a
     Right x         -> Routed mempty mempty x
 
 instance Applicative Result where
-    pure = Unmatched mempty
-    Matched   ps f <*> Matched ps' a = Matched (ps <> ps') (f a)
-    Matched   ps f <*> Unmatched _ a = Matched ps (f a)
-    Unmatched _  f <*> Matched   ps a = Matched ps (f a)
+    pure                               = Unmatched mempty
+    Matched   ps f <*> Matched   ps' a = Matched   (ps <> ps') (f a)
+    Matched   ps f <*> Unmatched _   a = Matched   ps          (f a)
+    Unmatched _  f <*> Matched   ps  a = Matched   ps          (f a)
     Unmatched ps f <*> Unmatched ps' a = Unmatched (ps <> ps') (f a)
 
 instance Monad Result where
-    Matched ps a >>= f = case f a of
-        Matched   ps' a' -> Matched (ps <> ps') a'
-        Unmatched _   a' -> Matched ps          a'
-    Unmatched ps a >>= f = case f a of
-        Matched ps' a' -> Matched ps' a'
-        Unmatched ps' a' -> Unmatched (ps <> ps') a'
+    Matched   ps a >>= f = case f a of Matched   ps' a' -> Matched   (ps <> ps') a'
+                                       Unmatched _   a' -> Matched   ps          a'
+    Unmatched ps a >>= f = case f a of Matched   ps' a' -> Matched   ps'         a'
+                                       Unmatched ps' a' -> Unmatched (ps <> ps') a'
 
 
-
-tstf :: Aeson.Value -> ResultT (Either Err2) Aeson.Value
+tstf :: Aeson.Value -> Either Fail (OK Aeson.Value)
 tstf = \case
-    Aeson.String s -> wrap $ Right $ Matched mempty $ Aeson.String "newVal"
+    Aeson.String s -> Right $ OK mempty $ Aeson.String "newVal"
 
---
--- updateCfg2 :: Ok | Err
--- errToUnmatched :: Ok | Routed
--- mapMValue :: Ok | Error | Unmatchedx
 
-updateCfg2 :: [Text] -> (Aeson.Value -> ResultT (Either Err2) Aeson.Value) -> Aeson.Value -> ResultT (Either Err2) Aeson.Value
+liftToResult :: Either Fail (OK a) -> ResultT (Either Fail) a
+liftToResult = wrap . fmap MatchedResult
+
+updateCfg2 :: [Text] -> (Aeson.Value -> Either Fail (OK Aeson.Value)) -> Aeson.Value -> Either Fail (OK Aeson.Value)
 updateCfg2 path f a = case path of
-    []          -> f a
-    ["*"]       -> error "todo"
-    ["**"]      -> error "todo"
-    ("*"  : ps) -> case val of
-        Matched ps a   -> wrap $ Right $ Matched ps a
-        Unmatched ps a -> wrap $ Left  $ Err2 (p:xx) uu
-        -- Err    e s     -> error "impossible" -- Err (p:e) s
-        where p   = "*"
-              Routed xx uu val = mapMValue (\p a -> errToUnmatched a $ prepPathT p $ updateCfg2 ps f a) a
-            --   val = prepErrPath "*" $ mapMValue (\p a -> prepPath p $ errToUnmatched a $ updateCfg2 ps f a) a
-    -- ("**" : ps) -> prepErrPath "**" $ mapMValue (\p -> prepPath p . updateCfg2 ps f) a
+    []            -> f a
+    ["*"]         -> error "todo"
+    ["**"]        -> error "todo"
+    (p@"*"  : ps) -> case val of
+        MatchedResult    a -> Right a
+        Unmatched     ps a -> Left $ Fail (p:xx) uu
+        where Routed xx uu val = mapMValue (\p a -> errToUnmatched a $ prepPathT p $ liftToResult $ updateCfg2 ps f a) a
+    (p@"**" : ps) -> case val' of
+        MatchedResult    a -> Right a
+        Unmatched     ps a -> Left $ Fail (p:xx') uu'
+        where rt  = mapMValue (\p a -> errToUnmatched a $ prepPathT p $ liftToResult $ updateCfg2 (p:ps) f a) a
+              Routed xx' uu' val' = join $ mapM (mapMValue (\p a -> errToUnmatched a $ prepPathT p $ liftToResult $ updateCfg2 ps     f a)) rt
+
     (p    : ps) -> case unwrap val of
-        Left (Err2 e s) -> wrap $ Left (Err2 (p:e) s)
+        Left (Fail e s) -> Left (Fail (p:e) s)
         Right a         -> case a of
-            Matched   ps a -> wrap $ Right $ Matched (TreeSet.singletonCons p ps) a
-            Unmatched ps a -> wrap $ Left $ Err2 [p] ps
-        where val = mapMValue (\t -> if t == p then updateCfg2 ps f else wrap . Right . Unmatched (Set.singleton t)) a
+            Matched   ps a -> Right $ OK (TreeSet.singletonCons p ps) a
+            Unmatched ps a -> Left  $ Fail [p] ps
+        where val = mapMValue (\t -> if t == p then liftToResult . updateCfg2 ps f else wrap . Right . Unmatched (Set.singleton t)) a
 
-
+-- mapM :: (Traversable t, Monad m) => (a -> m b) -> t a -> m (t b)
 
 mapMValue :: Monad m => (Text -> Aeson.Value -> m Aeson.Value) -> Aeson.Value -> m Aeson.Value
 mapMValue f = \case
@@ -659,7 +657,8 @@ main = do
 
     let json = toJSON (Baz1 (Bar1 (Foo1 "1defx" "1defy" "1defz") (Foo2 "1defx2" "1defy2")) (Bar2 (Foo1 "2defx" "2defy" "2defz") (Foo2 "2defx2" "2defy2")))
     pprint json
-    pprint $ updateCfg2 ["*", "*", "x"] tstf json
+    -- pprint $ updateCfg2 ["*", "*", "x"] tstf json
+    pprint $ updateCfg2 ["**", "x"] tstf json
 
 
     args <- System.getArgs
@@ -740,3 +739,12 @@ main = do
 -- luna build --verbose debug
 -- luna build +verbose
 -- luna build -verbose --pass enable
+
+
+--     a >>= f = wrap $ unwrap a >>= \case
+--         Matched t s -> unwrap (f s) >>= return . \case
+--             Matched   t' s' -> Matched (t <> t') s'
+--             Unmatched _  s' -> Matched t         s'
+--         Unmatched t s -> unwrap (f s) >>= return . \case
+--             Matched   t' s' -> Matched   t'        s'
+--             Unmatched t' s' -> Unmatched (t <> t') s'
