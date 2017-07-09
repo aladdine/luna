@@ -30,6 +30,15 @@ instance (Show k, IsValue t) => Show (TreeSet t k) where show      = show . toLi
 instance (Show k, IsValue t) => Read (TreeSet t k) where readsPrec = fromList .: readsPrec
 
 
+-- === Construction === --
+
+singleton :: (IsValue t, Ord k) => k -> TreeSet t k
+singleton k = wrap $ TreeMap.singleton k ()
+
+singletonCons :: (IsValue t, Ord k) => k -> TreeSet t k -> TreeSet t k
+singletonCons k = wrap . TreeMap.singletonCons k () . unwrap
+
+
 -- === Attributes === --
 
 null :: IsValue t => TreeSet t k -> Bool

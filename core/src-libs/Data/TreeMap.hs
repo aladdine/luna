@@ -87,7 +87,10 @@ justIfNotNullBranch t = justIf (not $ nullBranch t) t
 -- === Construction === --
 
 singleton :: (IsValue t, Ord k) => k -> a -> TreeMap t k a
-singleton k a = mempty & branches . at k .~ Just (TreeBranch (mkVal a) mempty)
+singleton k a = singletonCons k a mempty
+
+singletonCons :: (IsValue t, Ord k) => k -> a -> TreeMap t k a -> TreeMap t k a
+singletonCons k a base = mempty & branches . at k .~ Just (TreeBranch (mkVal a) base)
 
 singletonBranch :: IsValue t => a -> TreeBranch t k a
 singletonBranch a = TreeBranch (mkVal a) mempty

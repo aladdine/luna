@@ -29,6 +29,12 @@ import Text.Parsert hiding (Result)
 import qualified Data.TreeMap as TreeMap
 import           Data.TreeMap (SparseTreeMap)
 
+import qualified Data.TreeSet as TreeSet
+import           Data.TreeSet (SolidTreeSet)
+
+import qualified Data.Set as Set
+import           Data.Set (Set)
+
 import qualified Data.Aeson.Lens
 import qualified Data.HashMap.Lazy as HashMap
 import qualified Data.Vector       as Vector
@@ -470,75 +476,94 @@ printHelpAndExit p = liftIO $ outputHelp titleTagMap p >> exitSuccess where
 
 
 
-
-
-
-
-
-
-data Result e a = Result [e] Bool a
-                | Err    [Text] [Text]
-                deriving (Show, Functor, Traversable, Foldable)
+data Result a = Matched   (SolidTreeSet Text) a
+              | Unmatched (Set Text) a
+              | Err       [Text] (Set Text)
+              deriving (Show, Functor, Traversable, Foldable)
 makeLenses ''Result
 
-mapErr :: ([Text] -> [Text]) -> Result e a -> Result e a
-mapErr f = \case
-    Result es b a -> Result es b a
-    Err    e  s   -> Err (f e) s
+data Routed a = Routed [Text] (Set Text) (Result a) deriving (Show, Functor, Traversable, Foldable)
 
-class Monad m => MonadRegex m where
-    returnUnchanged :: forall a. a -> m a
-    returnChanged   :: forall a. a -> m a
-    -- checkSuccess    :: forall a. m a -> Bool
-    -- dropErrors      :: forall a. m a -> m a
+instance Applicative Routed where
+    pure = Routed mempty mempty . pure
+    Routed p s a <*> Routed p' s' f = Routed (longerPath p p') (if cmpLength p p' then s else s') $ a <*> f
 
+instance Monad Routed where
+    Routed p s a >>= f = undefined
 
-class MonadErr e m where
-    failed     :: forall a. e -> a -> m a
+cmpLength p p' = length p > length p'
 
+longerPath p p' = if pl > pl' then p else p' where
+    pl  = length p
+    pl' = length p'
 
-instance Applicative (Result e) where
-    pure = Result mempty False
-    Err e s       <*> _               = Err e s
-    _             <*> Err e s         = Err e s
-    Result es b f <*> Result es' b' a = Result (es <> es') (b || b') (f a)
+prepErrPath :: Text -> Result a -> Result a
+prepErrPath p = \case
+    -- Matched ps a -> Matched (TreeSet.singletonCons p ps) a
+    Err     e s  -> Err (p : e) s
+    a            -> a
 
-instance Monad (Result e) where
+prepPath :: Text -> Result a -> Result a
+prepPath p = \case
+    Matched ps a -> Matched (TreeSet.singletonCons p ps) a
+    a            -> a
+
+errToUnmatched :: a -> Result a -> Routed a
+errToUnmatched a = \case
+    Err e s -> Routed e s $ Unmatched s a
+    x       -> Routed mempty mempty x
+
+instance Applicative Result where
+    pure = Unmatched mempty
+    Err e s      <*> _             = Err e s
+    _            <*> Err e s       = Err e s
+    Matched   ps f <*> Matched ps' a = Matched (ps <> ps') (f a)
+    Matched   ps f <*> Unmatched _ a = Matched ps (f a)
+    Unmatched _  f <*> Matched   ps a = Matched ps (f a)
+    Unmatched ps f <*> Unmatched ps' a = Unmatched (ps <> ps') (f a)
+
+instance Monad Result where
     Err e s >>= f = Err e s
-    Result es b a >>= f = case f a of
-        Result es' b' a' -> Result (es <> es') (b || b') a'
+    Matched ps a >>= f = case f a of
+        Matched   ps' a' -> Matched (ps <> ps') a'
+        Unmatched _   a' -> Matched ps          a'
         Err    e s       -> Err e s
-
-instance MonadRegex (Result e) where
-    returnUnchanged = Result mempty False
-    returnChanged   = Result mempty True
-    -- checkSuccess    = view success
-    -- dropErrors      = ways .~ mempty
-
-instance (e ~ e') => MonadErr e (Result e') where
-    failed e = Result [e] False
+    Unmatched ps a >>= f = case f a of
+        Matched ps' a' -> Matched ps' a'
+        Unmatched ps' a' -> Unmatched (ps <> ps') a'
+        Err e s          -> Err e s
 
 
 
-tstf :: Aeson.Value -> Result Text Aeson.Value
+tstf :: Aeson.Value -> Result Aeson.Value
 tstf = \case
-    Aeson.String s -> returnChanged $ Aeson.String "newVal"
+    Aeson.String s -> Matched mempty $ Aeson.String "newVal"
 
+--
+-- updateCfg2 :: Ok | Err
+-- errToUnmatched :: Ok | Routed
+-- mapMValue :: Ok | Error | Unmatchedx
 
-updateCfg2 :: [Text] -> (Aeson.Value -> Result Text Aeson.Value) -> Aeson.Value -> Result Text Aeson.Value
+updateCfg2 :: [Text] -> (Aeson.Value -> Result Aeson.Value) -> Aeson.Value -> Result Aeson.Value
 updateCfg2 path f a = case path of
     []          -> f a
     ["*"]       -> error "todo"
     ["**"]      -> error "todo"
-    ("*"  : ps) -> mapErr ("*" :) $ mapMValue (const $ updateCfg2 ps f) a
+    ("*"  : ps) -> case val of
+        Matched ps a   -> Matched ps a
+        Unmatched ps a -> Err (p:xx) uu
+        Err    e s     -> error "impossible" -- Err (p:e) s
+        where p   = "*"
+              Routed xx uu val = mapMValue (\p a -> errToUnmatched a $ prepPath p $ updateCfg2 ps f a) a
+            --   val = prepErrPath "*" $ mapMValue (\p a -> prepPath p $ errToUnmatched a $ updateCfg2 ps f a) a
+    -- ("**" : ps) -> prepErrPath "**" $ mapMValue (\p -> prepPath p . updateCfg2 ps f) a
     (p    : ps) -> case val of
-        Result es ok a -> if ok then Result mempty ok a else Err [p] es
+        Matched ps a   -> Matched (TreeSet.singletonCons p ps) a
+        Unmatched ps a -> Err [p] ps
         Err    e s     -> Err (p:e) s
-        where val = mapMValue (\t -> if t == p then updateCfg2 ps f else failed t) a
-        -- if checkSuccess val then dropErrors val else val where
-        -- case val of
+        where val = mapMValue (\t -> if t == p then updateCfg2 ps f else Unmatched (Set.singleton t)) a
 
-    -- (p:ps)   -> mapMValue p
+
 
 mapMValue :: Monad m => (Text -> Aeson.Value -> m Aeson.Value) -> Aeson.Value -> m Aeson.Value
 mapMValue f = \case
@@ -552,17 +577,23 @@ mapMValue f = \case
 
 
 
-data Foo = Foo { _x :: Text
-               , _y :: Text
-               , _z :: Text
-               } deriving (Generic, Show)
-makeLenses ''Foo
+data Foo1 = Foo1 { _x :: Text
+                 , _y :: Text
+                 , _z :: Text
+                 } deriving (Generic, Show)
 
-instance ToJSON   Foo where toEncoding = Lens.toEncoding; toJSON = Lens.toJSON
-instance FromJSON Foo where parseJSON  = Lens.parse
+data Foo2 = Foo2 { _x :: Text
+                 , _y :: Text
+                 } deriving (Generic, Show)
+-- makeLenses ''Foo
 
-data Bar = Bar { _foo1 :: Foo
-               , _foo2 :: Foo
+instance ToJSON   Foo1 where toEncoding = Lens.toEncoding; toJSON = Lens.toJSON
+instance FromJSON Foo1 where parseJSON  = Lens.parse
+instance ToJSON   Foo2 where toEncoding = Lens.toEncoding; toJSON = Lens.toJSON
+instance FromJSON Foo2 where parseJSON  = Lens.parse
+
+data Bar = Bar { _foo1 :: Foo1
+               , _foo2 :: Foo2
                } deriving (Generic, Show)
 makeLenses ''Bar
 
@@ -579,9 +610,9 @@ main = do
     -- let m = fromList [("a","b")] :: Map Text Text
     -- print $ Aeson.encode m
 
-    let json = toJSON (Bar (Foo "defx" "defy" "defz") (Foo "defx2" "defy2" "defz2"))
+    let json = toJSON (Bar (Foo1 "defx" "defy" "defz") (Foo2 "defx2" "defy2"))
     pprint json
-    pprint $ updateCfg2 ["*", "a"] tstf json
+    pprint $ updateCfg2 ["*", "w"] tstf json
 
 
     args <- System.getArgs
