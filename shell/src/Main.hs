@@ -134,8 +134,8 @@ updateCfg path val a = convert1 $ fromJSON =<< newVal where
         "false" -> Aeson.Bool False
         _       -> Aeson.String s
 
--- updateCfg2 :: (FromJSON a, ToJSON a) => [Text] -> Text -> a -> Either Text a
--- updateCfg2 path val a = convert1 $ fromJSON =<< newVal where
+-- updateValue :: (FromJSON a, ToJSON a) => [Text] -> Text -> a -> Either Text a
+-- updateValue path val a = convert1 $ fromJSON =<< newVal where
 --     newVal  = Aeson.patch diff (toJSON a)
 --     diff    = Aeson.Patch [Aeson.Rep (Aeson.Pointer (Aeson.OKey <$> path)) (mkVal val)]
 --     mkVal s = case Text.toLower s of
@@ -486,7 +486,7 @@ printHelpAndExit p = liftIO $ outputHelp titleTagMap p >> exitSuccess where
 data Projections = Projections { _len :: Int, _paths :: Map [Text] (Set Text) } deriving (Show)
 makeLenses ''Projections
 
-instance Mempty Projections where mempty = Projections 0 mempty
+instance Mempty Projections where mempty = Projections 0 $ fromList [([],mempty)]
 instance Semigroup Projections where
     Projections l ps <> Projections l' ps' = if
         | l == l' -> Projections l (Map.unionWith (<>) ps ps')
@@ -532,6 +532,9 @@ pattern Matched   p a = MatchedResult   (Match   p a)
 pattern Unmatched p a = UnmatchedResult (NoMatch p a)
 
 
+mapUnmatched :: (NoMatch a -> NoMatch a) -> Result a -> Result a
+mapUnmatched f = \case MatchedResult   a -> MatchedResult a
+                       UnmatchedResult a -> UnmatchedResult $ f a
 
 newtype ResultT m a = ResultT (m (Result a)) deriving (Functor, Traversable, Foldable)
 makeLenses ''ResultT
@@ -546,23 +549,6 @@ instance Monad m => Monad (ResultT m) where
 
 deriving instance Show (Unwrapped (ResultT m a)) => Show (ResultT m a)
 
-data Routed a = Routed [Text] (Set Text) (Result a) deriving (Show, Functor, Traversable, Foldable)
-
-instance Applicative Routed where
-    pure = Routed mempty mempty . pure
-    Routed p s a <*> Routed p' s' f = Routed (longerPath p p') (if cmpLength p p' then s else s') $ a <*> f
-
-instance Monad Routed where
-    Routed p s a >>= f = undefined
-
-cmpLength p p' = length p > length p'
-
-longerPath p p' = if pl > pl' then p else p' where
-    pl  = length p
-    pl' = length p'
-
-prepErrPath :: Text -> ResultT (Either Fail) a -> ResultT (Either Fail) a
-prepErrPath p = wrapped %~ mapLeft (\(Fail es) -> Fail $ extendProjection p es)
 
 prepPath :: Text -> Result a -> Result a
 prepPath p = \case
@@ -572,10 +558,6 @@ prepPath p = \case
 prepPathT :: Functor m => Text -> ResultT m a -> ResultT m a
 prepPathT p = wrapped %~ fmap (prepPath p)
 
--- errToUnmatched :: a -> ResultT (Either Fail) a -> Routed a
--- errToUnmatched a r = case unwrap r of
---     Left (Fail es) -> Routed undefined undefined $ Unmatched es a
---     Right x         -> Routed mempty mempty x
 
 errToUnmatched :: a -> ResultT (Either Fail) a -> Result a
 errToUnmatched a r = case unwrap r of
@@ -604,39 +586,35 @@ tstf = \case
 liftToResult :: Either Fail (Match a) -> ResultT (Either Fail) a
 liftToResult = wrap . fmap MatchedResult
 
-updateCfg2 :: [Text] -> (Aeson.Value -> Either Fail (Match Aeson.Value)) -> Aeson.Value -> Either Fail (Match Aeson.Value)
-updateCfg2 path f a = case path of
+tryUpdateValue :: [Text] -> (Aeson.Value -> Either Fail (Match Aeson.Value)) -> Text -> Aeson.Value -> Result Aeson.Value
+tryUpdateValue path f t a = errToUnmatched a $ prepPathT t $ liftToResult $ updateValue path f a
+
+updateValue :: [Text] -> (Aeson.Value -> Either Fail (Match Aeson.Value)) -> Aeson.Value -> Either Fail (Match Aeson.Value)
+updateValue path f a = case path of
     []            -> f a
-    ["*"]         -> error "todo"
-    ["**"]        -> error "todo"
-    (p@"*"  : ps) -> case val of
-        MatchedResult    a -> Right a
-        Unmatched     ps a -> Left $ Fail (extendProjection p ps) -- FIXME: extend p ?
-        where val = mapMValue (\p a -> errToUnmatched a $ prepPathT p $ liftToResult $ updateCfg2 ps f a) a
-    (p@"**" : ps) -> case val of
-        MatchedResult    a -> Right a
-        Unmatched     ps a -> Left $ Fail (extendProjection p ps) -- FIXME: extend p ?
-        where rt  = mapMValue (\p a -> errToUnmatched a $ prepPathT p $ liftToResult $ updateCfg2 (p:ps) f a) a
-              val = join $ mapM (mapMValue (\p a -> errToUnmatched a $ prepPathT p $ liftToResult $ updateCfg2 ps     f a)) rt
-
-    (p    : ps) -> case unwrap val of
+    (p@"*"  : ps) -> eitherMatched id (Fail . extendProjection p) $ mapMValue (tryUpdateValue ps f) a
+    (p@"**" : ps) -> eitherMatched id (Fail . extendProjection p) $ join $ mapM (mapMValue (tryUpdateValue ps f))
+                                                                  $ mapMValue (tryUpdateValue (p:ps) f) a
+    (p      : ps) -> case unwrap val of
         Left (Fail es) -> Left $ Fail (extendProjection p es)
-        Right a         -> case a of
-            Matched   ps a -> Right $ Match (TreeSet.singletonCons p ps) a
-            Unmatched ps a -> Left $ Fail $ extendProjection p ps -- FIXME[WD]: should we extend it here?
-        where val = mapMValue (\t -> if t == p then liftToResult . updateCfg2 ps f else wrap . Right . Unmatched (singletonProjection [] $ Set.singleton t)) a
+        Right a        -> eitherMatched (matchTree %~ TreeSet.singletonCons p) (Fail . extendProjection p) a
+        where val = flip mapMValue a $ \t -> if t == p
+                  then liftToResult . updateValue ps f
+                  else wrap . Right . Unmatched (singletonProjection [] $ Set.singleton t)
 
--- mapM :: (Traversable t, Monad m) => (a -> m b) -> t a -> m (t b)
+eitherMatched :: (Match a -> r) -> (Projections -> e) -> Result a -> Either e r
+eitherMatched fok ffail = fromMatched (Right . fok) (Left . ffail)
+
+fromMatched :: (Match a -> out) -> (Projections -> out) -> Result a -> out
+fromMatched fok ffail = \case
+    MatchedResult a    -> fok a
+    Unmatched     ps _ -> ffail ps
 
 mapMValue :: Monad m => (Text -> Aeson.Value -> m Aeson.Value) -> Aeson.Value -> m Aeson.Value
 mapMValue f = \case
     Aeson.Object m -> Aeson.Object <$> HashMap.traverseWithKey f m
     Aeson.Array  v -> Aeson.Array  <$> Vector.mapM (mapMValue f) v
-    Aeson.String s -> error "todo"
-    Aeson.Number n -> error "todo"
-    Aeson.Bool   b -> error "todo"
-    Aeson.Null     -> error "todo"
-
+    a              -> return a
 
 
 
@@ -685,9 +663,9 @@ main = do
 
     let json = toJSON (Baz1 (Bar1 (Foo1 "1defx" "1defy" "1defz") (Foo2 "1defx2" "1defy2")) (Bar2 (Foo1 "2defx" "2defy" "2defz") (Foo2 "2defx2" "2defy2")))
     pprint json
-    -- pprint $ updateCfg2 ["*", "*", "w"] tstf json
-    -- pprint $ updateCfg2 ["*", "*", "x"] tstf json
-    pprint $ updateCfg2 ["**", "x"] tstf json
+    -- pprint $ updateValue ["*", "*", "w"] tstf json
+    -- pprint $ updateValue ["*", "*", "x"] tstf json
+    pprint $ updateValue ["bar1", "*", "w"] tstf json
 
 
     args <- System.getArgs
