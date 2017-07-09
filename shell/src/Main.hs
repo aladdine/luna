@@ -483,7 +483,9 @@ printHelpAndExit p = liftIO $ outputHelp titleTagMap p >> exitSuccess where
 
 --
 
-data Projections = Projections { _len :: Int, paths :: Map [Text] (Set Text) } deriving (Show)
+data Projections = Projections { _len :: Int, _paths :: Map [Text] (Set Text) } deriving (Show)
+makeLenses ''Projections
+
 instance Mempty Projections where mempty = Projections 0 mempty
 instance Semigroup Projections where
     Projections l ps <> Projections l' ps' = if
@@ -491,13 +493,17 @@ instance Semigroup Projections where
         | l >  l' -> Projections l  ps
         | l <  l' -> Projections l' ps'
 
-singletonProjection :: Text -> Set Text -> Projections
-singletonProjection p s = Projections 1 $ fromList [([p],s)]
+singletonProjection :: [Text] -> Set Text -> Projections
+singletonProjection p s = Projections (length p) $ fromList [(p,s)]
+
+extendProjection :: Text -> Projections -> Projections
+extendProjection t p = p & len   %~ succ
+                         & paths %~ fromList . fmap (_1 %~ (t:)) . Map.assocs
 
 
-data Match   a = Match   { _matchTree :: SolidTreeSet Text, _result      :: a } deriving (Show, Functor, Traversable, Foldable)
-data NoMatch a = NoMatch { _leafs :: Set Text         , _transResult :: a } deriving (Show, Functor, Traversable, Foldable)
-data Fail      = Fail       [Text] (Set Text)     deriving (Show)
+data Match   a = Match   { _matchTree   :: SolidTreeSet Text, _result      :: a } deriving (Show, Functor, Traversable, Foldable)
+data NoMatch a = NoMatch { _projections :: Projections      , _transResult :: a } deriving (Show, Functor, Traversable, Foldable)
+data Fail      = Fail      Projections     deriving (Show)
 
 makeLenses ''Match
 
@@ -556,7 +562,7 @@ longerPath p p' = if pl > pl' then p else p' where
     pl' = length p'
 
 prepErrPath :: Text -> ResultT (Either Fail) a -> ResultT (Either Fail) a
-prepErrPath p = wrapped %~ mapLeft (\(Fail e s) -> Fail (p:e) s)
+prepErrPath p = wrapped %~ mapLeft (\(Fail es) -> Fail $ extendProjection p es)
 
 prepPath :: Text -> Result a -> Result a
 prepPath p = \case
@@ -566,10 +572,15 @@ prepPath p = \case
 prepPathT :: Functor m => Text -> ResultT m a -> ResultT m a
 prepPathT p = wrapped %~ fmap (prepPath p)
 
-errToUnmatched :: a -> ResultT (Either Fail) a -> Routed a
+-- errToUnmatched :: a -> ResultT (Either Fail) a -> Routed a
+-- errToUnmatched a r = case unwrap r of
+--     Left (Fail es) -> Routed undefined undefined $ Unmatched es a
+--     Right x         -> Routed mempty mempty x
+
+errToUnmatched :: a -> ResultT (Either Fail) a -> Result a
 errToUnmatched a r = case unwrap r of
-    Left (Fail e s) -> Routed e s $ Unmatched s a
-    Right x         -> Routed mempty mempty x
+    Left  (Fail es) -> Unmatched es a
+    Right s         -> s
 
 instance Applicative Result where
     pure                               = Unmatched mempty
@@ -600,20 +611,20 @@ updateCfg2 path f a = case path of
     ["**"]        -> error "todo"
     (p@"*"  : ps) -> case val of
         MatchedResult    a -> Right a
-        Unmatched     ps a -> Left $ Fail (p:xx) uu
-        where Routed xx uu val = mapMValue (\p a -> errToUnmatched a $ prepPathT p $ liftToResult $ updateCfg2 ps f a) a
-    (p@"**" : ps) -> case val' of
+        Unmatched     ps a -> Left $ Fail (extendProjection p ps) -- FIXME: extend p ?
+        where val = mapMValue (\p a -> errToUnmatched a $ prepPathT p $ liftToResult $ updateCfg2 ps f a) a
+    (p@"**" : ps) -> case val of
         MatchedResult    a -> Right a
-        Unmatched     ps a -> Left $ Fail (p:xx') uu'
+        Unmatched     ps a -> Left $ Fail (extendProjection p ps) -- FIXME: extend p ?
         where rt  = mapMValue (\p a -> errToUnmatched a $ prepPathT p $ liftToResult $ updateCfg2 (p:ps) f a) a
-              Routed xx' uu' val' = join $ mapM (mapMValue (\p a -> errToUnmatched a $ prepPathT p $ liftToResult $ updateCfg2 ps     f a)) rt
+              val = join $ mapM (mapMValue (\p a -> errToUnmatched a $ prepPathT p $ liftToResult $ updateCfg2 ps     f a)) rt
 
     (p    : ps) -> case unwrap val of
-        Left (Fail e s) -> Left (Fail (p:e) s)
+        Left (Fail es) -> Left $ Fail (extendProjection p es)
         Right a         -> case a of
             Matched   ps a -> Right $ Match (TreeSet.singletonCons p ps) a
-            Unmatched ps a -> Left  $ Fail [p] ps
-        where val = mapMValue (\t -> if t == p then liftToResult . updateCfg2 ps f else wrap . Right . Unmatched (Set.singleton t)) a
+            Unmatched ps a -> Left $ Fail $ extendProjection p ps -- FIXME[WD]: should we extend it here?
+        where val = mapMValue (\t -> if t == p then liftToResult . updateCfg2 ps f else wrap . Right . Unmatched (singletonProjection [] $ Set.singleton t)) a
 
 -- mapM :: (Traversable t, Monad m) => (a -> m b) -> t a -> m (t b)
 
@@ -674,6 +685,7 @@ main = do
 
     let json = toJSON (Baz1 (Bar1 (Foo1 "1defx" "1defy" "1defz") (Foo2 "1defx2" "1defy2")) (Bar2 (Foo1 "2defx" "2defy" "2defz") (Foo2 "2defx2" "2defy2")))
     pprint json
+    -- pprint $ updateCfg2 ["*", "*", "w"] tstf json
     -- pprint $ updateCfg2 ["*", "*", "x"] tstf json
     pprint $ updateCfg2 ["**", "x"] tstf json
 
