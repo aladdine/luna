@@ -14,7 +14,6 @@ import qualified Control.Lens.Aeson as Lens
 import System.Console.Options hiding (main)
 import qualified System.Console.Options as O
 import System.Exit (exitSuccess, exitFailure)
-import Text.Parsert hiding (option)
 import qualified Data.Layout        as Doc
 import           Data.Layout        ((<+>), (</>), (<//>))
 
@@ -25,8 +24,14 @@ import qualified Data.Aeson.Pointer as Aeson
 import Control.Monad.Branch
 
 import qualified Text.Parsert as Parsert
-import Text.Parsert
+import Text.Parsert hiding (Result)
 
+import qualified Data.TreeMap as TreeMap
+import           Data.TreeMap (SparseTreeMap)
+
+import qualified Data.Aeson.Lens
+import qualified Data.HashMap.Lazy as HashMap
+import qualified Data.Vector       as Vector
 
 instance Convertible Bool String where convert = show
 instance Convertible Bool Text   where convert = convertVia @String
@@ -118,6 +123,28 @@ updateCfg path val a = convert1 $ fromJSON =<< newVal where
         "true"  -> Aeson.Bool True
         "false" -> Aeson.Bool False
         _       -> Aeson.String s
+
+-- updateCfg2 :: (FromJSON a, ToJSON a) => [Text] -> Text -> a -> Either Text a
+-- updateCfg2 path val a = convert1 $ fromJSON =<< newVal where
+--     newVal  = Aeson.patch diff (toJSON a)
+--     diff    = Aeson.Patch [Aeson.Rep (Aeson.Pointer (Aeson.OKey <$> path)) (mkVal val)]
+--     mkVal s = case Text.toLower s of
+--         "true"  -> Aeson.Bool True
+--         "false" -> Aeson.Bool False
+--         _       -> Aeson.String s
+
+
+
+-- mapMValue :: Monad m => Text -> (Aeson.Value -> m Aeson.Value) -> Aeson.Value -> m Aeson.Value
+-- mapMValue t f = \case
+--     Aeson.Object m -> Aeson.Object <$> HashMap.lookup t m
+    -- Aeson.Array  v -> Aeson.Array  <$> Vector.mapM (mapMValue f) v
+    -- Aeson.String s -> error "todo"
+    -- Aeson.Number n -> error "todo"
+    -- Aeson.Bool   b -> error "todo"
+    -- Aeson.Null     -> error "todo"
+
+-- traverseWithKey :: Applicative f => (k -> v1 -> f v2) -> HashMap k v1 -> f (HashMap k v2)
 
 updateCfgM :: (FromJSON a, ToJSON a, MonadErrorParser SomeError m) => [Text] -> Text -> a -> m a
 updateCfgM = either (raise . wrongConfPathError) return .:. updateCfg
@@ -211,26 +238,30 @@ data Optimization = None
 --                        , _memStats  :: Bool
 --                     --    ,
 --                        }
+--
+-- newtype Switch = Switch { _enabled :: Bool } deriving (Generic, Show)
+-- makeLenses ''Switch
 
-newtype Switch = Switch { _enabled :: Bool } deriving (Generic, Show)
-makeLenses ''Switch
-
-instance ToJSON   Switch where toEncoding = Lens.toEncoding; toJSON = Lens.toJSON
-instance FromJSON Switch where parseJSON  = Lens.parse
+-- instance ToJSON   Switch where toEncoding = Lens.toEncoding; toJSON = Lens.toJSON
+-- instance FromJSON Switch where parseJSON  = Lens.parse
 
 
--- data Hook = Hook 
---     { _enabled :: Bool
---     , _options :: Map Text Text
---     } deriving (Generic, Show)
+data Hook = Hook
+    { _enabled :: Bool
+    , _options :: Map Text Text
+    } deriving (Generic, Show)
+makeLenses ''Hook
+
+instance ToJSON   Hook where toEncoding = Lens.toEncoding; toJSON = Lens.toJSON
+instance FromJSON Hook where parseJSON  = Lens.parse
+
 
 data BuildHooks = BuildHooks
-    { _after :: AfterBuildHooks
+    { _after :: Map Text Hook
     } deriving (Generic, Show)
 
-data AfterBuildHooks = AfterBuildHooks
-    { _run :: Switch
-    } deriving (Generic, Show)
+instance ToJSON   BuildHooks where toEncoding = Lens.toEncoding; toJSON = Lens.toJSON
+instance FromJSON BuildHooks where parseJSON  = Lens.parse
 
 data BuildCfg = BuildCfg
     { --_optimization :: Optimization
@@ -241,24 +272,18 @@ data BuildCfg = BuildCfg
     -- , _report       :: ConfigTree
     } deriving (Generic, Show)
 makeLenses ''BuildCfg
-makeLenses ''BuildHooks
-makeLenses ''AfterBuildHooks
 
 instance Mempty BuildCfg where
-    mempty = BuildCfg (BuildHooks $ AfterBuildHooks $ Switch $ False) mempty
+    mempty = BuildCfg (BuildHooks $ fromList [("run", Hook False mempty)]) mempty
 
 -- stats
-instance ToJSON    BuildHooks      where toEncoding = Lens.toEncoding; toJSON = Lens.toJSON
-instance ToJSON    AfterBuildHooks where toEncoding = Lens.toEncoding; toJSON = Lens.toJSON
-instance ToJSON    BuildCfg        where toEncoding = Lens.toEncoding; toJSON = Lens.toJSON
-instance FromJSON  BuildHooks      where parseJSON  = Lens.parse
-instance FromJSON  AfterBuildHooks where parseJSON  = Lens.parse
-instance FromJSON  BuildCfg        where parseJSON  = Lens.parse
+instance ToJSON   BuildCfg where toEncoding = Lens.toEncoding; toJSON = Lens.toJSON
+instance FromJSON BuildCfg where parseJSON  = Lens.parse
 
 instance CmdParser BuildCfg where
     parseCmd = addHelp'
              $ handleGenConf' . fmap (mempty,)
-             $ pure <$> (confAlias "hooks.after.run.enabled" <$> flag "run" (help "Run the output program after successful compilation."))
+             $ pure [] -- <$> (confAlias "hooks.after.run.enabled" <$> flag "run" (help "Run the output program after successful compilation."))
 
  --  $ (\r -> mempty & hooks.after.run.enabled .~ r) <$> flag "run" (help "Run the output program after successful compilation.")
 --
@@ -450,12 +475,114 @@ printHelpAndExit p = liftIO $ outputHelp titleTagMap p >> exitSuccess where
 
 
 
+
+data Result e a = Result [e] Bool a
+                | Err    [Text] [Text]
+                deriving (Show, Functor, Traversable, Foldable)
+makeLenses ''Result
+
+mapErr :: ([Text] -> [Text]) -> Result e a -> Result e a
+mapErr f = \case
+    Result es b a -> Result es b a
+    Err    e  s   -> Err (f e) s
+
+class Monad m => MonadRegex m where
+    returnUnchanged :: forall a. a -> m a
+    returnChanged   :: forall a. a -> m a
+    -- checkSuccess    :: forall a. m a -> Bool
+    -- dropErrors      :: forall a. m a -> m a
+
+
+class MonadErr e m where
+    failed     :: forall a. e -> a -> m a
+
+
+instance Applicative (Result e) where
+    pure = Result mempty False
+    Err e s       <*> _               = Err e s
+    _             <*> Err e s         = Err e s
+    Result es b f <*> Result es' b' a = Result (es <> es') (b || b') (f a)
+
+instance Monad (Result e) where
+    Err e s >>= f = Err e s
+    Result es b a >>= f = case f a of
+        Result es' b' a' -> Result (es <> es') (b || b') a'
+        Err    e s       -> Err e s
+
+instance MonadRegex (Result e) where
+    returnUnchanged = Result mempty False
+    returnChanged   = Result mempty True
+    -- checkSuccess    = view success
+    -- dropErrors      = ways .~ mempty
+
+instance (e ~ e') => MonadErr e (Result e') where
+    failed e = Result [e] False
+
+
+
+tstf :: Aeson.Value -> Result Text Aeson.Value
+tstf = \case
+    Aeson.String s -> returnChanged $ Aeson.String "newVal"
+
+
+updateCfg2 :: [Text] -> (Aeson.Value -> Result Text Aeson.Value) -> Aeson.Value -> Result Text Aeson.Value
+updateCfg2 path f a = case path of
+    []          -> f a
+    ["*"]       -> error "todo"
+    ["**"]      -> error "todo"
+    ("*"  : ps) -> mapErr ("*" :) $ mapMValue (const $ updateCfg2 ps f) a
+    (p    : ps) -> case val of
+        Result es ok a -> if ok then Result mempty ok a else Err [p] es
+        Err    e s     -> Err (p:e) s
+        where val = mapMValue (\t -> if t == p then updateCfg2 ps f else failed t) a
+        -- if checkSuccess val then dropErrors val else val where
+        -- case val of
+
+    -- (p:ps)   -> mapMValue p
+
+mapMValue :: Monad m => (Text -> Aeson.Value -> m Aeson.Value) -> Aeson.Value -> m Aeson.Value
+mapMValue f = \case
+    Aeson.Object m -> Aeson.Object <$> HashMap.traverseWithKey f m
+    Aeson.Array  v -> Aeson.Array  <$> Vector.mapM (mapMValue f) v
+    Aeson.String s -> error "todo"
+    Aeson.Number n -> error "todo"
+    Aeson.Bool   b -> error "todo"
+    Aeson.Null     -> error "todo"
+
+
+
+
+data Foo = Foo { _x :: Text
+               , _y :: Text
+               , _z :: Text
+               } deriving (Generic, Show)
+makeLenses ''Foo
+
+instance ToJSON   Foo where toEncoding = Lens.toEncoding; toJSON = Lens.toJSON
+instance FromJSON Foo where parseJSON  = Lens.parse
+
+data Bar = Bar { _foo1 :: Foo
+               , _foo2 :: Foo
+               } deriving (Generic, Show)
+makeLenses ''Bar
+
+instance ToJSON   Bar where toEncoding = Lens.toEncoding; toJSON = Lens.toJSON
+instance FromJSON Bar where parseJSON  = Lens.parse
+
+
+
+
 main :: IO ()
 main = do
     -- O.main
     -- putStrLn "----------------"
-    let m = fromList [("a","b")] :: Map Text Text
-    print $ Aeson.encode m
+    -- let m = fromList [("a","b")] :: Map Text Text
+    -- print $ Aeson.encode m
+
+    let json = toJSON (Bar (Foo "defx" "defy" "defz") (Foo "defx2" "defy2" "defz2"))
+    pprint json
+    pprint $ updateCfg2 ["*", "a"] tstf json
+
 
     args <- System.getArgs
     if null args
@@ -465,14 +592,14 @@ main = do
             print out
 
 
-runTest7 :: IO (Either (NonEmpty String) (String,String))
-runTest7 = runBranchBreaker
-         $ evalBacktracker
-         $ runFailParser
-         $ evalStreamProvider (listStream "bazzz")
-         $ evalOffsetRegister
-        --  $ (tokens "ba" <|> tokens "b")
-         $ (,) <$> branched (tokens "ba") <*> (tokens "b")
+-- runTest7 :: IO (Either (NonEmpty String) (String,String))
+-- runTest7 = runBranchBreaker
+--          $ evalBacktracker
+--          $ runFailParser
+--          $ evalStreamProvider (listStream "bazzz")
+--          $ evalOffsetRegister
+--         --  $ (tokens "ba" <|> tokens "b")
+--          $ (,) <$> branched (tokens "ba") <*> (tokens "b")
 
 -- runOptionParser :: MonadIO m => ParserT m a -> [String] -> m a
 

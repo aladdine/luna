@@ -38,6 +38,8 @@ executables:
       - aeson-diff
       - lens-utils
       - monad-branch
+      - lens-aeson
+      - vector
 
 default-extensions:
     - AllowAmbiguousTypes
