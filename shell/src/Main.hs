@@ -482,31 +482,48 @@ printHelpAndExit p = liftIO $ outputHelp titleTagMap p >> exitSuccess where
 -- mapLeftT = flip bimapEitherT id
 
 --
-data OK   a = OK { _path :: SolidTreeSet Text, _result :: a } deriving (Show, Functor, Traversable, Foldable)
--- data Unmatched2 a = Unmatched2 (Set Text) a          deriving (Show, Functor, Traversable, Foldable)
-data Fail         = Fail       [Text] (Set Text)     deriving (Show)
 
-makeLenses ''OK
+data Projections = Projections { _len :: Int, paths :: Map [Text] (Set Text) } deriving (Show)
+instance Mempty Projections where mempty = Projections 0 mempty
+instance Semigroup Projections where
+    Projections l ps <> Projections l' ps' = if
+        | l == l' -> Projections l (Map.unionWith (<>) ps ps')
+        | l >  l' -> Projections l  ps
+        | l <  l' -> Projections l' ps'
+
+singletonProjection :: Text -> Set Text -> Projections
+singletonProjection p s = Projections 1 $ fromList [([p],s)]
+
+
+data Match   a = Match   { _matchTree :: SolidTreeSet Text, _result      :: a } deriving (Show, Functor, Traversable, Foldable)
+data NoMatch a = NoMatch { _leafs :: Set Text         , _transResult :: a } deriving (Show, Functor, Traversable, Foldable)
+data Fail      = Fail       [Text] (Set Text)     deriving (Show)
+
+makeLenses ''Match
 
 --
--- data UpdateResult a = URMatched (OK a)
+-- data UpdateResult a = URMatched (Match a)
 --                     | URErr     Fail
 --                     deriving (Show, Functor, Traversable, Foldable)
 --
--- data SearchResult a = SRMatched (OK a)
+-- data SearchResult a = SRMatched (Match a)
 --                     |
 
 
--- ok :: Convertible1' OK t => SolidTreeSet Text -> a -> t a
--- ok = convert1' .: OK
--- instance Convertible1 OK Result where convert1 = MatchedResult
+-- ok :: Convertible1' Match t => SolidTreeSet Text -> a -> t a
+-- ok = convert1' .: Match
+-- instance Convertible1 Match Result where convert1 = MatchedResult
+--
+-- data ParResult a = MatchedParResult   (Match a)
+--                  | UnmatchedParResult
 
-data Result a = MatchedResult (OK a)
-              | Unmatched     (Set Text) a
+data Result a = MatchedResult   (Match   a)
+              | UnmatchedResult (NoMatch a)
               deriving (Show, Functor, Traversable, Foldable)
 makeLenses ''Result
 
-pattern Matched ps f = MatchedResult (OK ps f)
+pattern Matched   p a = MatchedResult   (Match   p a)
+pattern Unmatched p a = UnmatchedResult (NoMatch p a)
 
 
 
@@ -568,15 +585,15 @@ instance Monad Result where
                                        Unmatched ps' a' -> Unmatched (ps <> ps') a'
 
 
-tstf :: Aeson.Value -> Either Fail (OK Aeson.Value)
+tstf :: Aeson.Value -> Either Fail (Match Aeson.Value)
 tstf = \case
-    Aeson.String s -> Right $ OK mempty $ Aeson.String "newVal"
+    Aeson.String s -> Right $ Match mempty $ Aeson.String "newVal"
 
 
-liftToResult :: Either Fail (OK a) -> ResultT (Either Fail) a
+liftToResult :: Either Fail (Match a) -> ResultT (Either Fail) a
 liftToResult = wrap . fmap MatchedResult
 
-updateCfg2 :: [Text] -> (Aeson.Value -> Either Fail (OK Aeson.Value)) -> Aeson.Value -> Either Fail (OK Aeson.Value)
+updateCfg2 :: [Text] -> (Aeson.Value -> Either Fail (Match Aeson.Value)) -> Aeson.Value -> Either Fail (Match Aeson.Value)
 updateCfg2 path f a = case path of
     []            -> f a
     ["*"]         -> error "todo"
@@ -594,7 +611,7 @@ updateCfg2 path f a = case path of
     (p    : ps) -> case unwrap val of
         Left (Fail e s) -> Left (Fail (p:e) s)
         Right a         -> case a of
-            Matched   ps a -> Right $ OK (TreeSet.singletonCons p ps) a
+            Matched   ps a -> Right $ Match (TreeSet.singletonCons p ps) a
             Unmatched ps a -> Left  $ Fail [p] ps
         where val = mapMValue (\t -> if t == p then liftToResult . updateCfg2 ps f else wrap . Right . Unmatched (Set.singleton t)) a
 
