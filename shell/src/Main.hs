@@ -472,9 +472,17 @@ printHelpAndExit p = liftIO $ outputHelp titleTagMap p >> exitSuccess where
 -- === Shell === --
 -------------------
 
-
-
-
+--
+-- data Matched2   a = Matched2   (SolidTreeSet Text) a deriving (Show, Functor, Traversable, Foldable)
+-- data Unmatched2 a = Unmatched2 (Set Text) a          deriving (Show, Functor, Traversable, Foldable)
+-- data Err2         = Err2       [Text] (Set Text)     deriving (Show)
+--
+-- data UpdateResult a = URMatched (Matched2 a)
+--                     | URErr     Err2
+--                     deriving (Show, Functor, Traversable, Foldable)
+--
+-- data SearchResult a = SRMatched (Matched2 a)
+--                     |
 
 data Result a = Matched   (SolidTreeSet Text) a
               | Unmatched (Set Text) a
@@ -592,16 +600,26 @@ instance FromJSON Foo1 where parseJSON  = Lens.parse
 instance ToJSON   Foo2 where toEncoding = Lens.toEncoding; toJSON = Lens.toJSON
 instance FromJSON Foo2 where parseJSON  = Lens.parse
 
-data Bar = Bar { _foo1 :: Foo1
-               , _foo2 :: Foo2
-               } deriving (Generic, Show)
-makeLenses ''Bar
+data Bar1 = Bar1 { _foo1 :: Foo1
+                 , _foo2 :: Foo2
+                 } deriving (Generic, Show)
 
-instance ToJSON   Bar where toEncoding = Lens.toEncoding; toJSON = Lens.toJSON
-instance FromJSON Bar where parseJSON  = Lens.parse
+instance ToJSON   Bar1 where toEncoding = Lens.toEncoding; toJSON = Lens.toJSON
+instance FromJSON Bar1 where parseJSON  = Lens.parse
 
+data Bar2 = Bar2 { _foo1 :: Foo1
+                 , _foox :: Foo2
+                 } deriving (Generic, Show)
 
+instance ToJSON   Bar2 where toEncoding = Lens.toEncoding; toJSON = Lens.toJSON
+instance FromJSON Bar2 where parseJSON  = Lens.parse
 
+data Baz1 = Baz1 { _bar1 :: Bar1
+                 , _bar2 :: Bar2
+                 } deriving (Generic, Show)
+
+instance ToJSON   Baz1 where toEncoding = Lens.toEncoding; toJSON = Lens.toJSON
+instance FromJSON Baz1 where parseJSON  = Lens.parse
 
 main :: IO ()
 main = do
@@ -610,9 +628,9 @@ main = do
     -- let m = fromList [("a","b")] :: Map Text Text
     -- print $ Aeson.encode m
 
-    let json = toJSON (Bar (Foo1 "defx" "defy" "defz") (Foo2 "defx2" "defy2"))
+    let json = toJSON (Baz1 (Bar1 (Foo1 "1defx" "1defy" "1defz") (Foo2 "1defx2" "1defy2")) (Bar2 (Foo1 "2defx" "2defy" "2defz") (Foo2 "2defx2" "2defy2")))
     pprint json
-    pprint $ updateCfg2 ["*", "w"] tstf json
+    pprint $ updateCfg2 ["*", "*", "x"] tstf json
 
 
     args <- System.getArgs
