@@ -52,70 +52,199 @@ instance Convertible Bool Text   where convert = convertVia @String
 
 
 
---
---
-class CmdParser a where
-    parseCmd :: Parser a
---
---
---
---
--- phantom :: Mod FlagFields () -> Parser ()
--- phantom = flag () ()
---
--- phantom' :: Parser ()
--- phantom' = phantom mempty
+
+
+--------------------------
+-- === Projections === --
+--------------------------
+
+-- | Possible regex paths projections
+
+-- === Definition === --
+
+data Projections = Projections { _len :: Int, _paths :: Map [Text] (Set Text) } deriving (Show)
+makeLenses ''Projections
+
+
+-- === Utils === --
+
+singletonProjection :: [Text] -> Set Text -> Projections
+singletonProjection p s = Projections (length p) $ fromList [(p,s)]
+
+extendProjection :: Text -> Projections -> Projections
+extendProjection t p = p & len   %~ succ
+                         & paths %~ fromList . fmap (_1 %~ (t:)) . Map.assocs
+
+
+-- === Instances === --
+
+instance Mempty Projections where mempty = Projections 0 $ fromList [([],mempty)]
+instance Semigroup Projections where
+    Projections l ps <> Projections l' ps' = if
+        | l == l' -> Projections l (Map.unionWith (<>) ps ps')
+        | l >  l' -> Projections l  ps
+        | l <  l' -> Projections l' ps'
 
 
 
+-------------------------------------
+-- === Object regex traversals === --
+-------------------------------------
 
--- === Verbosity === --
+-- === Primitive result types === --
 
--- data Verbosity = Verbosity { _scope :: Text
---                            , _level :: Level
---                            } deriving (Show)
--- data Level = Debug
---            | Info
---            | Error
---            | Panic
---            deriving (Show)
---
--- makeLenses ''Verbosity
+data Match   a = Match   { _matchTree       :: SolidTreeSet Text, _result      :: a } deriving (Show, Functor, Traversable, Foldable)
+data NoMatch a = NoMatch { _projections     :: Projections      , _transResult :: a } deriving (Show, Functor, Traversable, Foldable)
+data Fail      = Fail    { _failProjections :: Projections                          } deriving (Show)
+
+makeLenses ''Match
+makeLenses ''NoMatch
+makeLenses ''Fail
 
 
--- ------------------------
--- -- === PassStatus === --
--- ------------------------
---
--- data PassStatus = Enable | Disable deriving (Show, Read)
---
--- passMapParser :: Parser (Map Text PassStatus)
--- passMapParser = foldr (uncurry Map.insert) mempty <$> many passPassStatusParser
---
--- passPassStatusParser :: Parser (Text, PassStatus)
--- passPassStatusParser = flip (,)
---                <$> option (eitherReader $ readPretty . convert) (hidden <> long "pass" <> metavar "switch name" <> help "Switch passes execution.")
---                <*> strArgument (internal <> metavar "name")
---
--- instance Pretty PassStatus where
---     showPretty   = Text.toLower . convert . show
---     readPretty s = mapLeft (const . convert $ "Unexpected pass command '" <> s <> "'. Expecting 'enable' or 'disable'.") . tryReads $ Text.toTitle s
+-- === Complex results === --
+
+data Result a = MatchedResult   (Match   a)
+              | UnmatchedResult (NoMatch a)
+              deriving (Show, Functor, Traversable, Foldable)
+
+newtype ResultT m a = ResultT (m (Result a)) deriving (Functor, Traversable, Foldable)
+
+makeLenses ''Result
+makeLenses ''ResultT
+
+pattern Matched   p a = MatchedResult   (Match   p a)
+pattern Unmatched p a = UnmatchedResult (NoMatch p a)
+
+
+-- === Utils === --
+
+mapUnmatched :: (NoMatch a -> NoMatch a) -> Result a -> Result a
+mapUnmatched f = \case MatchedResult   a -> MatchedResult a
+                       UnmatchedResult a -> UnmatchedResult $ f a
+
+prepPath :: Text -> Result a -> Result a
+prepPath p = \case
+    Matched ps a -> Matched (TreeSet.singletonCons p ps) a
+    a            -> a
+
+prepPathT :: Functor m => Text -> ResultT m a -> ResultT m a
+prepPathT p = wrapped %~ fmap (prepPath p)
+
+errToUnmatched :: a -> ResultT (Either Fail) a -> Result a
+errToUnmatched a r = case unwrap r of
+    Left  (Fail es) -> Unmatched es a
+    Right s         -> s
+
+liftResult :: Either Fail (Match a) -> ResultT (Either Fail) a
+liftResult = wrap . fmap MatchedResult
+
+
+-- === Instances === --
+
+deriving instance Show (Unwrapped (ResultT m a)) => Show (ResultT m a)
+
+instance Applicative Result where
+    pure                               = Unmatched mempty
+    Matched   ps f <*> Matched   ps' a = Matched   (ps <> ps') (f a)
+    Matched   ps f <*> Unmatched _   a = Matched   ps          (f a)
+    Unmatched _  f <*> Matched   ps  a = Matched   ps          (f a)
+    Unmatched ps f <*> Unmatched ps' a = Unmatched (ps <> ps') (f a)
+
+instance Monad Result where
+    Matched   ps a >>= f = case f a of Matched   ps' a' -> Matched   (ps <> ps') a'
+                                       Unmatched _   a' -> Matched   ps          a'
+    Unmatched ps a >>= f = case f a of Matched   ps' a' -> Matched   ps'         a'
+                                       Unmatched ps' a' -> Unmatched (ps <> ps') a'
+
+instance Monad m => Applicative (ResultT m) where
+    pure    = wrap . pure . pure
+    f <*> a = wrap $ unwrap f <<*>> unwrap a
+
+instance Monad m => Monad (ResultT m) where
+    a >>= f = wrap . fmap join . join $ fmap sequence t where
+        t  = fmap2 (unwrap . f) $ unwrap a
+
+
+
+--------------------------
+-- === Value update === --
+--------------------------
+
+tryUpdateValue :: [Text] -> (Aeson.Value -> Either Fail (Match Aeson.Value)) -> Text -> Aeson.Value -> Result Aeson.Value
+tryUpdateValue path f t a = errToUnmatched a $ prepPathT t $ liftResult $ updateValue path f a
+
+updateValue :: [Text] -> (Aeson.Value -> Either Fail (Match Aeson.Value)) -> Aeson.Value -> Either Fail (Match Aeson.Value)
+updateValue path f a = case path of
+    []            -> f a
+    (p@"*"  : ps) -> eitherMatched id (Fail . extendProjection p) $ mapMValue (tryUpdateValue ps f) a
+    (p@"**" : ps) -> eitherMatched id (Fail . extendProjection p) $ join $ mapM (mapMValue (tryUpdateValue ps f))
+                                                                  $ mapMValue (tryUpdateValue (p:ps) f) a
+    (p      : ps) -> case unwrap val of
+        Left (Fail es) -> Left $ Fail (extendProjection p es)
+        Right a        -> eitherMatched (matchTree %~ TreeSet.singletonCons p) (Fail . extendProjection p) a
+        where val = flip mapMValue a $ \t -> if t == p
+                  then liftResult . updateValue ps f
+                  else wrap . Right . Unmatched (singletonProjection [] $ Set.singleton t)
+
+eitherMatched :: (Match a -> r) -> (Projections -> e) -> Result a -> Either e r
+eitherMatched fok ffail = fromMatched (Right . fok) (Left . ffail)
+
+fromMatched :: (Match a -> out) -> (Projections -> out) -> Result a -> out
+fromMatched fok ffail = \case
+    MatchedResult a    -> fok a
+    Unmatched     ps _ -> ffail ps
+
+mapMValue :: Monad m => (Text -> Aeson.Value -> m Aeson.Value) -> Aeson.Value -> m Aeson.Value
+mapMValue f = \case
+    Aeson.Object m -> Aeson.Object <$> HashMap.traverseWithKey f m
+    Aeson.Array  v -> Aeson.Array  <$> Vector.mapM (mapMValue f) v
+    a              -> return a
+
+
+
 
 
 --------------------
 -- === Errors === --
 --------------------
 
--- === WrongConfPathError === --
+-- === InternalError === --
 
-newtype WrongConfPathError = WrongConfPathError Text deriving (Show)
-makeLenses ''WrongConfPathError
+newtype InternalError = InternalError Text deriving (Show)
+makeLenses ''InternalError
 
-wrongConfPathError :: Text -> SomeError
-wrongConfPathError = toSomeError . WrongConfPathError
+internalError :: Text -> SomeError
+internalError = toSomeError . InternalError
 
-instance IsError WrongConfPathError where
-    renderError e  = "Wrong configuration path:" <+> convert (unwrap e)
+instance IsError InternalError where
+    renderError e = "Impossible happened:" <+> convert (unwrap e)
+
+
+-- === NotMatchedConfPathError === --
+
+data NotMatchedConfPathError = NotMatchedConfPathError [Text] Projections deriving (Show)
+makeLenses ''NotMatchedConfPathError
+
+notMatchedConfPathError :: [Text] -> Projections -> SomeError
+notMatchedConfPathError = toSomeError .: NotMatchedConfPathError
+
+instance IsError NotMatchedConfPathError where
+    renderError (NotMatchedConfPathError p ps) = "Unrecognized property" <+> Doc.squoted (convert $ intercalate "." p) <> "."
+                                             </> "Best matches:" </> Doc.indented (Doc.block matches) where
+        matches = foldl (</>) mempty $ uncurry mkMatch <$> Map.assocs (ps ^. paths)
+        mkMatch p set = ("-" <+>) $ Doc.block
+                      $ "Property:      " <+> Doc.squoted (convert . intercalate "." $ init p)
+                    </> "Possible paths:" <+> Doc.braced  (convert $ intercalate ", " set)
+
+
+
+
+class CmdParser a where
+    parseCmd :: Parser a
+
+
+
 
 
 
@@ -125,39 +254,21 @@ instance IsError WrongConfPathError where
 
 -- === Config update === --
 
-updateCfg :: (FromJSON a, ToJSON a) => [Text] -> Text -> a -> Either Text a
-updateCfg path val a = convert1 $ fromJSON =<< newVal where
-    newVal  = Aeson.patch diff (toJSON a)
-    diff    = Aeson.Patch [Aeson.Rep (Aeson.Pointer (Aeson.OKey <$> path)) (mkVal val)]
-    mkVal s = case Text.toLower s of
-        "true"  -> Aeson.Bool True
-        "false" -> Aeson.Bool False
-        _       -> Aeson.String s
+replaceValue :: Text -> Aeson.Value -> Either Fail (Match Aeson.Value)
+replaceValue s = \case
+    Aeson.String s -> Right $ Match mempty $ Aeson.String s
+    Aeson.Bool   b -> case Text.toLower s of
+        "true"  -> Right $ Match mempty $ Aeson.Bool True
+        "false" -> Right $ Match mempty $ Aeson.Bool False
+        s       -> Left (Fail mempty) -- FIXME: Add some nice error message about conversion error
 
--- updateValue :: (FromJSON a, ToJSON a) => [Text] -> Text -> a -> Either Text a
--- updateValue path val a = convert1 $ fromJSON =<< newVal where
---     newVal  = Aeson.patch diff (toJSON a)
---     diff    = Aeson.Patch [Aeson.Rep (Aeson.Pointer (Aeson.OKey <$> path)) (mkVal val)]
---     mkVal s = case Text.toLower s of
---         "true"  -> Aeson.Bool True
---         "false" -> Aeson.Bool False
---         _       -> Aeson.String s
-
-
-
--- mapMValue :: Monad m => Text -> (Aeson.Value -> m Aeson.Value) -> Aeson.Value -> m Aeson.Value
--- mapMValue t f = \case
---     Aeson.Object m -> Aeson.Object <$> HashMap.lookup t m
-    -- Aeson.Array  v -> Aeson.Array  <$> Vector.mapM (mapMValue f) v
-    -- Aeson.String s -> error "todo"
-    -- Aeson.Number n -> error "todo"
-    -- Aeson.Bool   b -> error "todo"
-    -- Aeson.Null     -> error "todo"
-
--- traverseWithKey :: Applicative f => (k -> v1 -> f v2) -> HashMap k v1 -> f (HashMap k v2)
-
-updateCfgM :: (FromJSON a, ToJSON a, MonadErrorParser SomeError m) => [Text] -> Text -> a -> m a
-updateCfgM = either (raise . wrongConfPathError) return .:. updateCfg
+-- TODO: Add debug information about what has changed (it is encoded in the dropped argument in Match)
+updateCfg :: (FromJSON a, ToJSON a, MonadErrorParser SomeError m) => [Text] -> Text -> a -> m a
+updateCfg path val a = case updateValue path (replaceValue val) (toJSON a) of
+    Left  (Fail ps)     -> raise $ notMatchedConfPathError path ps
+    Right (Match _ val) -> case convert1 (fromJSON val) of
+        Left  e -> raise $ internalError e
+        Right a -> return a
 
 
 -- === Parsers === --
@@ -180,11 +291,11 @@ optSetParser :: Parser ([Text], Text)
 optSetParser = fullOptSetParser <|> shortOptDisableParser <|> shortOptEnableParser
 
 handleGenConf :: (FromJSON a, ToJSON a) => Parser a -> Parser a
-handleGenConf p = bindParser (uncurry $ foldM (flip $ uncurry updateCfgM))
+handleGenConf p = bindParser (uncurry $ foldM (flip $ uncurry updateCfg))
                 $ (,) <$> p <#> multiple optSetParser
 
 handleGenConf' :: (FromJSON a, ToJSON a) => Parser (a, [([Text], Text)]) -> Parser a
-handleGenConf' p = bindParser (uncurry $ foldM (flip $ uncurry updateCfgM))
+handleGenConf' p = bindParser (uncurry $ foldM (flip $ uncurry updateCfg))
                  $ flip ((_2 %~) . flip (<>)) <$> p <#> multiple optSetParser
 
 
@@ -267,7 +378,8 @@ instance FromJSON Hook where parseJSON  = Lens.parse
 
 
 data BuildHooks = BuildHooks
-    { _after :: Map Text Hook
+    { _before :: Map Text Hook
+    , _after  :: Map Text Hook
     } deriving (Generic, Show)
 
 instance ToJSON   BuildHooks where toEncoding = Lens.toEncoding; toJSON = Lens.toJSON
@@ -284,7 +396,7 @@ data BuildCfg = BuildCfg
 makeLenses ''BuildCfg
 
 instance Mempty BuildCfg where
-    mempty = BuildCfg (BuildHooks $ fromList [("run", Hook False mempty)]) mempty
+    mempty = BuildCfg (BuildHooks mempty $ fromList [("run", Hook False mempty)]) mempty
 
 -- stats
 instance ToJSON   BuildCfg where toEncoding = Lens.toEncoding; toJSON = Lens.toJSON
@@ -483,153 +595,6 @@ printHelpAndExit p = liftIO $ outputHelp titleTagMap p >> exitSuccess where
 
 --
 
---------------------------
--- === Projections === --
---------------------------
-
--- | Possible paths projections
-
--- === Definition === --
-
-data Projections = Projections { _len :: Int, _paths :: Map [Text] (Set Text) } deriving (Show)
-makeLenses ''Projections
-
-
--- === Utils === --
-
-singletonProjection :: [Text] -> Set Text -> Projections
-singletonProjection p s = Projections (length p) $ fromList [(p,s)]
-
-extendProjection :: Text -> Projections -> Projections
-extendProjection t p = p & len   %~ succ
-                         & paths %~ fromList . fmap (_1 %~ (t:)) . Map.assocs
-
-
--- === Instances === --
-
-instance Mempty Projections where mempty = Projections 0 $ fromList [([],mempty)]
-instance Semigroup Projections where
-    Projections l ps <> Projections l' ps' = if
-        | l == l' -> Projections l (Map.unionWith (<>) ps ps')
-        | l >  l' -> Projections l  ps
-        | l <  l' -> Projections l' ps'
-
-
-
--------------------------------------
--- === Object regex traversals === --
--------------------------------------
-
--- === Primitive result types === --
-
-data Match   a = Match   { _matchTree       :: SolidTreeSet Text, _result      :: a } deriving (Show, Functor, Traversable, Foldable)
-data NoMatch a = NoMatch { _projections     :: Projections      , _transResult :: a } deriving (Show, Functor, Traversable, Foldable)
-data Fail      = Fail    { _failProjections :: Projections                          } deriving (Show)
-
-makeLenses ''Match
-makeLenses ''NoMatch
-makeLenses ''Fail
-
--- === Complex results === --
-
-data Result a = MatchedResult   (Match   a)
-              | UnmatchedResult (NoMatch a)
-              deriving (Show, Functor, Traversable, Foldable)
-
-newtype ResultT m a = ResultT (m (Result a)) deriving (Functor, Traversable, Foldable)
-
-makeLenses ''Result
-makeLenses ''ResultT
-
-pattern Matched   p a = MatchedResult   (Match   p a)
-pattern Unmatched p a = UnmatchedResult (NoMatch p a)
-
-
--- === Utils === --
-
-mapUnmatched :: (NoMatch a -> NoMatch a) -> Result a -> Result a
-mapUnmatched f = \case MatchedResult   a -> MatchedResult a
-                       UnmatchedResult a -> UnmatchedResult $ f a
-
-prepPath :: Text -> Result a -> Result a
-prepPath p = \case
-    Matched ps a -> Matched (TreeSet.singletonCons p ps) a
-    a            -> a
-
-prepPathT :: Functor m => Text -> ResultT m a -> ResultT m a
-prepPathT p = wrapped %~ fmap (prepPath p)
-
-errToUnmatched :: a -> ResultT (Either Fail) a -> Result a
-errToUnmatched a r = case unwrap r of
-    Left  (Fail es) -> Unmatched es a
-    Right s         -> s
-
-liftResult :: Either Fail (Match a) -> ResultT (Either Fail) a
-liftResult = wrap . fmap MatchedResult
-
-
--- === Instances === --
-
-deriving instance Show (Unwrapped (ResultT m a)) => Show (ResultT m a)
-
-instance Applicative Result where
-    pure                               = Unmatched mempty
-    Matched   ps f <*> Matched   ps' a = Matched   (ps <> ps') (f a)
-    Matched   ps f <*> Unmatched _   a = Matched   ps          (f a)
-    Unmatched _  f <*> Matched   ps  a = Matched   ps          (f a)
-    Unmatched ps f <*> Unmatched ps' a = Unmatched (ps <> ps') (f a)
-
-instance Monad Result where
-    Matched   ps a >>= f = case f a of Matched   ps' a' -> Matched   (ps <> ps') a'
-                                       Unmatched _   a' -> Matched   ps          a'
-    Unmatched ps a >>= f = case f a of Matched   ps' a' -> Matched   ps'         a'
-                                       Unmatched ps' a' -> Unmatched (ps <> ps') a'
-
-instance Monad m => Applicative (ResultT m) where
-    pure    = wrap . pure . pure
-    f <*> a = wrap $ unwrap f <<*>> unwrap a
-
-instance Monad m => Monad (ResultT m) where
-    a >>= f = wrap . fmap join . join $ fmap sequence t where
-        t  = fmap2 (unwrap . f) $ unwrap a
-
-
-
---------------------------
--- === Value update === --
---------------------------
-
-tryUpdateValue :: [Text] -> (Aeson.Value -> Either Fail (Match Aeson.Value)) -> Text -> Aeson.Value -> Result Aeson.Value
-tryUpdateValue path f t a = errToUnmatched a $ prepPathT t $ liftResult $ updateValue path f a
-
-updateValue :: [Text] -> (Aeson.Value -> Either Fail (Match Aeson.Value)) -> Aeson.Value -> Either Fail (Match Aeson.Value)
-updateValue path f a = case path of
-    []            -> f a
-    (p@"*"  : ps) -> eitherMatched id (Fail . extendProjection p) $ mapMValue (tryUpdateValue ps f) a
-    (p@"**" : ps) -> eitherMatched id (Fail . extendProjection p) $ join $ mapM (mapMValue (tryUpdateValue ps f))
-                                                                  $ mapMValue (tryUpdateValue (p:ps) f) a
-    (p      : ps) -> case unwrap val of
-        Left (Fail es) -> Left $ Fail (extendProjection p es)
-        Right a        -> eitherMatched (matchTree %~ TreeSet.singletonCons p) (Fail . extendProjection p) a
-        where val = flip mapMValue a $ \t -> if t == p
-                  then liftResult . updateValue ps f
-                  else wrap . Right . Unmatched (singletonProjection [] $ Set.singleton t)
-
-eitherMatched :: (Match a -> r) -> (Projections -> e) -> Result a -> Either e r
-eitherMatched fok ffail = fromMatched (Right . fok) (Left . ffail)
-
-fromMatched :: (Match a -> out) -> (Projections -> out) -> Result a -> out
-fromMatched fok ffail = \case
-    MatchedResult a    -> fok a
-    Unmatched     ps _ -> ffail ps
-
-mapMValue :: Monad m => (Text -> Aeson.Value -> m Aeson.Value) -> Aeson.Value -> m Aeson.Value
-mapMValue f = \case
-    Aeson.Object m -> Aeson.Object <$> HashMap.traverseWithKey f m
-    Aeson.Array  v -> Aeson.Array  <$> Vector.mapM (mapMValue f) v
-    a              -> return a
-
-
 
 
 
@@ -777,3 +742,86 @@ main = do
 --         Unmatched t s -> unwrap (f s) >>= return . \case
 --             Matched   t' s' -> Matched   t'        s'
 --             Unmatched t' s' -> Unmatched (t <> t') s'
+
+
+
+--
+--
+--
+--
+-- phantom :: Mod FlagFields () -> Parser ()
+-- phantom = flag () ()
+--
+-- phantom' :: Parser ()
+-- phantom' = phantom mempty
+
+
+
+
+-- === Verbosity === --
+
+-- data Verbosity = Verbosity { _scope :: Text
+--                            , _level :: Level
+--                            } deriving (Show)
+-- data Level = Debug
+--            | Info
+--            | Error
+--            | Panic
+--            deriving (Show)
+--
+-- makeLenses ''Verbosity
+
+
+-- ------------------------
+-- -- === PassStatus === --
+-- ------------------------
+--
+-- data PassStatus = Enable | Disable deriving (Show, Read)
+--
+-- passMapParser :: Parser (Map Text PassStatus)
+-- passMapParser = foldr (uncurry Map.insert) mempty <$> many passPassStatusParser
+--
+-- passPassStatusParser :: Parser (Text, PassStatus)
+-- passPassStatusParser = flip (,)
+--                <$> option (eitherReader $ readPretty . convert) (hidden <> long "pass" <> metavar "switch name" <> help "Switch passes execution.")
+--                <*> strArgument (internal <> metavar "name")
+--
+-- instance Pretty PassStatus where
+--     showPretty   = Text.toLower . convert . show
+--     readPretty s = mapLeft (const . convert $ "Unexpected pass command '" <> s <> "'. Expecting 'enable' or 'disable'.") . tryReads $ Text.toTitle s
+
+
+
+-- updateCfg :: (FromJSON a, ToJSON a) => [Text] -> Text -> a -> Either Text a
+-- updateCfg path val a = convert1 $ fromJSON =<< newVal where
+--     newVal  = Aeson.patch diff (toJSON a)
+--     diff    = Aeson.Patch [Aeson.Rep (Aeson.Pointer (Aeson.OKey <$> path)) (mkVal val)]
+--     mkVal s = case Text.toLower s of
+--         "true"  -> Aeson.Bool True
+--         "false" -> Aeson.Bool False
+--         _       -> Aeson.String s
+
+-- updateValue :: (FromJSON a, ToJSON a) => [Text] -> Text -> a -> Either Text a
+-- updateValue path val a = convert1 $ fromJSON =<< newVal where
+--     newVal  = Aeson.patch diff (toJSON a)
+--     diff    = Aeson.Patch [Aeson.Rep (Aeson.Pointer (Aeson.OKey <$> path)) (mkVal val)]
+--     mkVal s = case Text.toLower s of
+--         "true"  -> Aeson.Bool True
+--         "false" -> Aeson.Bool False
+--         _       -> Aeson.String s
+
+
+
+-- mapMValue :: Monad m => Text -> (Aeson.Value -> m Aeson.Value) -> Aeson.Value -> m Aeson.Value
+-- mapMValue t f = \case
+--     Aeson.Object m -> Aeson.Object <$> HashMap.lookup t m
+    -- Aeson.Array  v -> Aeson.Array  <$> Vector.mapM (mapMValue f) v
+    -- Aeson.String s -> error "todo"
+    -- Aeson.Number n -> error "todo"
+    -- Aeson.Bool   b -> error "todo"
+    -- Aeson.Null     -> error "todo"
+
+-- traverseWithKey :: Applicative f => (k -> v1 -> f v2) -> HashMap k v1 -> f (HashMap k v2)
+
+-- updateCfgM :: (FromJSON a, ToJSON a, MonadErrorParser SomeError m) => [Text] -> Text -> a -> m a
+-- updateCfgM = either (raise . wrongConfPathError) return .:. updateCfg
