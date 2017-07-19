@@ -10,7 +10,9 @@ import qualified Data.Map as Map
 import           Data.Map (Map)
 import qualified GHC.Exts as GHC
 import           Data.List.NonEmpty (NonEmpty ((:|)))
-
+import           Data.Aeson         (ToJSON, toJSON, FromJSON, fromJSON, ToJSONKey, FromJSONKey)
+import qualified Data.Aeson         as Aeson
+import qualified Control.Lens.Aeson as Lens
 
 
 ------------------------------
@@ -69,10 +71,10 @@ instance IsValue       Maybe where checkVal = id
 type SparseTreeMap = TreeMap Maybe
 type SolidTreeMap  = TreeMap JustValue
 
-newtype TreeMap    t k a = TreeMap    { _branches :: Map k (TreeBranch t k a) } deriving (Show, Read, Functor, Foldable, Traversable, Mempty, Default, Semigroup, P.Monoid)
+newtype TreeMap    t k a = TreeMap    { _branches :: Map k (TreeBranch t k a) } deriving (Generic, Show, Read, Functor, Foldable, Traversable, Mempty, Default, Semigroup, P.Monoid)
 data    TreeBranch t k a = TreeBranch { _value    :: !(t a)
                                       , _subtree  :: !(TreeMap t k a)
-                                      } deriving (Show, Read, Functor, Foldable, Traversable)
+                                      } deriving (Generic, Show, Read, Functor, Foldable, Traversable)
 
 makeLenses ''TreeMap
 makeLenses ''TreeBranch
@@ -226,6 +228,14 @@ instance IsList (TreeMap t k a) => GHC.IsList (TreeMap t k a) where
     type Item   (TreeMap t k a) = Item (TreeMap t k a)
     toList   = toList
     fromList = fromList
+
+
+-- === Serialization === --
+
+instance (ToJSONKey k, ToJSON (t a)) => ToJSON (TreeMap    t k a) where toEncoding = Lens.toEncodingDropUnary; toJSON = Lens.toJSONDropUnary
+instance (ToJSONKey k, ToJSON (t a)) => ToJSON (TreeBranch t k a) where toEncoding = Lens.toEncodingDropUnary; toJSON = Lens.toJSONDropUnary
+instance (FromJSONKey k, FromJSON (t a), Ord k) => FromJSON (TreeMap    t k a) where parseJSON  = Lens.parseDropUnary
+instance (FromJSONKey k, FromJSON (t a), Ord k) => FromJSON (TreeBranch t k a) where parseJSON  = Lens.parseDropUnary
 
 
 

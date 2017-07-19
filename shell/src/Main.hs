@@ -20,7 +20,7 @@ import qualified Data.Layout        as Doc
 import           Data.Layout        ((<+>), (</>), (<//>))
 
 import qualified Data.Aeson         as Aeson
-import           Data.Aeson         (ToJSON, toJSON, FromJSON, fromJSON)
+import           Data.Aeson         (ToJSON, toJSON, FromJSON, fromJSON, toEncoding)
 import qualified Data.Aeson.Diff    as Aeson
 import qualified Data.Aeson.Pointer as Aeson
 import Control.Monad.Branch
@@ -261,6 +261,7 @@ replaceValue s = \case
         "true"  -> Right $ Match mempty $ Aeson.Bool True
         "false" -> Right $ Match mempty $ Aeson.Bool False
         s       -> Left (Fail mempty) -- FIXME: Add some nice error message about conversion error
+    s              -> Left (Fail mempty) -- FIXME: Add some nice error message about conversion error
 
 -- TODO: Add debug information about what has changed (it is encoded in the dropped argument in Match)
 updateCfg :: (FromJSON a, ToJSON a, MonadErrorParser SomeError m) => [Text] -> Text -> a -> m a
@@ -339,7 +340,7 @@ type ConfigTree = Map Text Text
 -- stats   = +pass.**.stats
 -- verbose = +pass.**.verbose
 
-
+-- luna build --set pass.transform.desugaring.blank-arguments.options.verbosity
 
 -- === Build === --
 
@@ -366,6 +367,43 @@ data Optimization = None
 -- instance ToJSON   Switch where toEncoding = Lens.toEncoding; toJSON = Lens.toJSON
 -- instance FromJSON Switch where parseJSON  = Lens.parse
 
+data PassConfig = PassConfig
+    { __enabled :: Bool
+    } deriving (Generic, Show)
+
+instance ToJSON   PassConfig where toEncoding = Lens.toEncoding; toJSON = Lens.toJSON
+instance FromJSON PassConfig where parseJSON  = Lens.parse
+
+
+newtype PassTreeMap    = PassTreeMap    (SparseTreeMap Text PassConfig)            deriving (Generic, Show)
+newtype PassTreeBranch = PassTreeBranch (TreeMap.TreeBranch Maybe Text PassConfig) deriving (Generic, Show)
+makeLenses ''PassTreeMap
+makeLenses ''PassTreeBranch
+
+type instance Item PassTreeMap = Item (Unwrapped PassTreeMap)
+deriving instance FromList PassTreeMap
+deriving instance ToList   PassTreeMap
+
+-- instance ToJSON   PassTreeMap where toEncoding = Lens.toEncoding; toJSON = Lens.toJSON
+instance FromJSON PassTreeMap where parseJSON  = Lens.parse
+instance ToJSON PassTreeMap where
+    toJSON (unwrap -> m) = toJSON (PassTreeBranch <$> unwrap m)
+
+instance ToJSON PassTreeBranch where
+    toJSON (unwrap -> b) = case b ^. TreeMap.value of
+        Nothing -> subtreeVal
+        Just a  -> if TreeMap.null subtree then toJSON a else merge (toJSON (fromList [("options", a)] :: Map Text PassConfig)) subtreeVal
+        where shortMode  = TreeMap.null subtree
+              subtree    = b ^. TreeMap.subtree
+              subtreeVal = toJSON . PassTreeMap $ b ^. TreeMap.subtree
+              merge (Aeson.Object m) (Aeson.Object m') = Aeson.Object (m <> m')
+
+instance FromJSON PassTreeMap where
+    name :: Type
+     pattern = definitionromJSON
+
+-- instance ToJSON   PackageHeader  where toEncoding = JSON.toEncoding . showPretty; toJSON = JSON.toJSON . showPretty
+-- instance FromJSON PackageHeader  where parseJSON  = either (fail . convert) return . readPretty <=< parseJSON
 
 data Hook = Hook
     { _enabled :: Bool
@@ -390,13 +428,13 @@ data BuildCfg = BuildCfg
     -- , _pragmas      :: Map Text Pragma
     -- , _pretend      :: Bool
      _hooks        :: BuildHooks
-    , _pass        :: ConfigTree
+    , _pass        :: PassTreeMap
     -- , _report       :: ConfigTree
     } deriving (Generic, Show)
 makeLenses ''BuildCfg
 
 instance Mempty BuildCfg where
-    mempty = BuildCfg (BuildHooks mempty $ fromList [("run", Hook False mempty)]) mempty
+    mempty = BuildCfg (BuildHooks mempty $ fromList [("run", Hook False mempty)]) (fromList [("transform" :| ["desugaring", "blank_arguments"], PassConfig False), ("transform" :| ["desugaring", "blank_arguments", "x"], PassConfig False)])
 
 -- stats
 instance ToJSON   BuildCfg where toEncoding = Lens.toEncoding; toJSON = Lens.toJSON
