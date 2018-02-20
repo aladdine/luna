@@ -98,3 +98,4 @@ To properly implement the C FFI
 - [GHC API](https://hackage.haskell.org/package/ghc)
 - [GHCi API](https://hackage.haskell.org/package/ghci-8.0.2)
 - [Hotswapping Haskell](https://simonmar.github.io/posts/2017-10-17-hotswapping-haskell.html)
+- [System.Plugins.Load Source](https://hackage.haskell.org/package/plugins-1.5.7/docs/src/System-Plugins-Load.html)
