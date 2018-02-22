@@ -5,6 +5,27 @@ integration of Luna with other C-FFI capable languages.
 ## List of Proposed Language Changes
 To properly implement the C FFI
 
+- Wrapping of C-level functions to be called from within Luna.
+  + `Std.FFI.C.Call`
+  + Brings the `foreign import [unsafe] C` syntax into scope.
+  + This takes arguments:
+    * `symbol`: The name of the foreign function
+    * `object`: The object in which the foreign function can be found. 
+    * `name`: The Luna-side name for the function. 
+    * `sig`: The type signature of the foreign function being imported. This is
+      specified in Luna's C Types. Must include the return type.
+  + It produces a binding in the scope containing the `foreign import` that can 
+    be called as any normal Luna function. 
+  + Potentially we could get away with not specifying the object file, but that
+    runs the risk of breaking existing code in case of a symbol clash. 
+  + For example, using Luna's block syntax:
+    
+    ```
+    foreign import C:
+      "Tensor.so":
+        "allocTensor" allocTensor :: CInt64 -> CPtr
+    ```
+
 - C Value Library:
   + `Std.FFI.C.Value`
   + This contains utilities for marshalling between the C types and Luna inbuilt
@@ -34,6 +55,7 @@ To properly implement the C FFI
   + Padding attributes for specifying alignment of struct attributes. This must
     allow users to query alignment, but also force certain alignments. 
 - Automatic conversion of Luna types to raw structs:
+  + Struct member access.
   + As struct layout is common (though technically implementation defined), we 
     can automatically marshal a Luna class into a value struct.
   + As long as the layout matches what the foreign function expects, this will
@@ -47,26 +69,6 @@ To properly implement the C FFI
   + Functionality for wrapping Luna functions as function pointers that are 
     able to be called from C
   + This ensures that callbacks work.
-- Wrapping of C-level functions to be called from within Luna.
-  + `Std.FFI.C.Call`
-  + Brings the `foreign import [unsafe] C` syntax into scope.
-  + This takes arguments:
-    * `symbol`: The name of the foreign function
-    * `object`: The object in which the foreign function can be found. 
-    * `name`: The Luna-side name for the function. 
-    * `sig`: The type signature of the foreign function being imported. This is
-      specified in Luna's C Types. Must include the return type.
-  + It produces a binding in the scope containing the `foreign import` that can 
-    be called as any normal Luna function. 
-  + Potentially we could get away with not specifying the object file, but that
-    runs the risk of breaking existing code in case of a symbol clash. 
-  + For example, using Luna's block syntax:
-    
-    ```
-    foreign import C:
-      "Tensor.so":
-        "allocTensor" allocTensor :: CInt64 -> CPtr
-    ```
 
 ## Implementation Notes
 
@@ -96,6 +98,8 @@ To properly implement the C FFI
 - [Unix (POSIX)](https://hackage.haskell.org/package/unix-2.7.2.2)
 - [Base](https://hackage.haskell.org/package/base-4.10.1.0)
 - [GHC API](https://hackage.haskell.org/package/ghc)
-- [GHCi API](https://hackage.haskell.org/package/ghci-8.0.2)
+- [GHCi API](https://hackage.haskell.org/package/ghci-8.2.2)
 - [Hotswapping Haskell](https://simonmar.github.io/posts/2017-10-17-hotswapping-haskell.html)
 - [System.Plugins.Load Source](https://hackage.haskell.org/package/plugins-1.5.7/docs/src/System-Plugins-Load.html)
+- [LibFFI](https://hackage.haskell.org/package/libffi-0.1)
+
